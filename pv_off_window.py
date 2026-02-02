@@ -68,12 +68,12 @@ def fetch_open_meteo_forecast(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
     hourly["hour"] = hourly["time"].dt.hour
 
     daily = pd.DataFrame(
-        {
-            "date": pd.to_datetime(j["daily"]["time"]).dt.date,
-            "sunrise": pd.to_datetime(j["daily"]["sunrise"]),
-            "sunset": pd.to_datetime(j["daily"]["sunset"]),
-        }
-    )
+    {
+        "date": pd.to_datetime(pd.Series(j["daily"]["time"])).dt.date,
+        "sunrise": pd.to_datetime(pd.Series(j["daily"]["sunrise"])),
+        "sunset": pd.to_datetime(pd.Series(j["daily"]["sunset"])),
+    }
+)
     return hourly, daily
 
 
