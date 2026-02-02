@@ -4,3 +4,5 @@ config.json
 *.log
 __pycache__/
 .DS_Store
+data/solax/*.xlsx
+cache/
