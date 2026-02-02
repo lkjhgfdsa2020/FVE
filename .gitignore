@@ -1,0 +1,6 @@
+.venv/
+config.json
+*.xlsx
+*.log
+__pycache__/
+.DS_Store
