@@ -2,12 +2,14 @@ name: Daily PV forecast
 
 on:
   schedule:
-    # GitHub Actions cron je v UTC.
-    # Europe/Prague = 8:00 je v zimě 7:00 UTC, v létě 6:00 UTC.
-    # Nejjednodušší robustní řešení: spustit v 6:00 i 7:00 UTC a skript pustit jen když je lokálně 8:00.
     - cron: "0 6 * * *"
     - cron: "0 7 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even if not 08:00 Europe/Prague"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
