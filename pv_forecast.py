@@ -342,7 +342,7 @@ def main():
         run_day=today,
         pred_today=today_kwh,
         pred_tomorrow=tomorrow_kwh,
-        out_csv="forecast_outputs/forecast_daily_summary.csv",
+        out_csv="forecasts/forecast_daily_summary.csv",
     )
     print(f"Souhrn uložen/aktualizován: {summary_path}")
 
