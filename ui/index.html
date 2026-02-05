@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PV Forecast Dashboard</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+
+<body>
+  <header class="header">
+    <div>
+      <h1>PV Forecast Dashboard</h1>
+      <p class="sub">
+        Zdroj: <code>forecasts/forecast_daily_summary.csv</code>
+        <span id="meta" class="meta"></span>
+      </p>
+    </div>
+    <div class="actions">
+      <button id="reloadBtn">Reload</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card">
+      <div class="card-head">
+        <h2>Graf</h2>
+        <div class="controls">
+          <label>
+            Zobrazit dní:
+            <select id="daysSelect">
+              <option value="14">14</option>
+              <option value="30" selected>30</option>
+              <option value="60">60</option>
+              <option value="120">120</option>
+              <option value="0">Vše</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <canvas id="chart" height="120"></canvas>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Tabulka</h2>
+        <div class="controls">
+          <input id="searchInput" type="search" placeholder="Hledej datum (YYYY-MM-DD)..." />
+          <label class="checkbox">
+            <input id="descToggle" type="checkbox" checked />
+            Nejnovější nahoře
+          </label>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th class="num">PredictionToday (kWh)</th>
+              <th class="num">PredictionTomorrow (kWh)</th>
+              <th class="num">Δ (Tomorrow - Today)</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Tip: stránka se dá hostovat přes GitHub Pages.</span>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>
