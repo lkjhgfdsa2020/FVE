@@ -1,0 +1,17 @@
+{
+  "latitude": 49.1694,
+  "longitude": 16.5097,
+  "timezone": "Europe/Prague",
+
+  "pv_kwp": 8.2,
+  "tilt_deg": 25,
+  "azimuth_deg_from_north": 221,
+
+  "export_limit_kw": 3.65,
+  "baseload_kw": 0.50,
+  "max_off_hours": 4,
+
+  "performance_ratio": 0.82,
+
+  "soc_8am": 20
+}
