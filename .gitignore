@@ -4,3 +4,7 @@ logs/
 forecast_outputs/
 cache/openmeteo/
 config.json
+
+# forecast_outputs/  (tohle klidně nech ignorované)
+# ale tohle commituj:
+!forecasts/
