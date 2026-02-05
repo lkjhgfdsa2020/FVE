@@ -1,8 +1,6 @@
-.venv/
-config.json
+data/solax/
 *.xlsx
-*.log
-__pycache__/
-.DS_Store
-data/solax/*.xlsx
-cache/
+logs/
+forecast_outputs/
+cache/openmeteo/
+config.json
