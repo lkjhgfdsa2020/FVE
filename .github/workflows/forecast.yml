@@ -31,17 +31,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run forecast (only at 08:00 Europe/Prague)
+      - name: Run forecast
         env:
           TZ: Europe/Prague
         run: |
-          H=$(date +%H)
-          M=$(date +%M)
           echo "Local time (Prague): $(date)"
-          if [ "$H" != "08" ] || [ "$M" != "00" ]; then
-            echo "Not 08:00 in Europe/Prague, skipping."
-            exit 0
+          FORCE="${{ github.event.inputs.force }}"
+          echo "Force mode: ${FORCE:-false}"
+
+          if [ "$FORCE" != "true" ]; then
+            H=$(date +%H)
+            M=$(date +%M)
+            if [ "$H" != "08" ] || [ "$M" != "00" ]; then
+              echo "Not 08:00 in Europe/Prague, skipping."
+              exit 0
+            fi
           fi
+
           python -u pv_forecast.py
 
       - name: Commit forecast summary
