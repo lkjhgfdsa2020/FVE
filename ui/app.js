@@ -113,18 +113,15 @@ function renderChart() {
         { label: "PredictionTomorrow (kWh)", data: tomorrow, tension: 0.25 },
       ],
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
+    ooptions: {
+  responsive: true,
+  maintainAspectRatio: false,
+  animation: false,
 
-      // Helps avoid “growing canvas” layout feedback loops
-      animation: false,
-      resizeDelay: 100,
-
-      plugins: {
-        legend: { labels: { color: "#9fb0c3" } },
-        tooltip: { enabled: true },
-      },
+  // IMPORTANT: reduce resize feedback loops
+  events: ["mousemove", "mouseout", "click", "touchstart", "touchmove"],
+  plugins: { ... }
+}
       scales: {
         x: {
           ticks: { color: "#9fb0c3", maxRotation: 0 },
