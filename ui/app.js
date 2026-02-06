@@ -1,4 +1,6 @@
 // ui/app.js
+// Dashboard for forecasts/forecast_daily_summary.csv
+// Hard-stabilized chart rendering to avoid "growing height" loops.
 
 const CSV_PATH = "../forecasts/forecast_daily_summary.csv"; // relative to /ui/
 
@@ -29,7 +31,7 @@ function parseCSV(text) {
     }))
     .filter((r) => r.Date);
 
-  // Keep in ascending order for time-series
+  // Keep in ascending order for time-series correctness
   rows.sort((a, b) => a.Date.localeCompare(b.Date));
   return rows;
 }
@@ -73,9 +75,7 @@ function renderTable() {
   tbody.innerHTML = "";
 
   for (const r of rows) {
-    const delta =
-      (r.PredictionTomorrow ?? 0) - (r.PredictionToday ?? 0);
-
+    const delta = (r.PredictionTomorrow ?? 0) - (r.PredictionToday ?? 0);
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${r.Date}</td>
@@ -87,11 +87,21 @@ function renderTable() {
   }
 }
 
+// Destroy chart safely
+function destroyChart() {
+  if (!chart) return;
+  try {
+    chart.destroy();
+  } catch (_) {}
+  chart = null;
+}
+
+// Create chart with extra-stable options to avoid resize feedback loops
 function renderChart() {
   const canvas = $("chart");
   if (!canvas) return;
 
-  // Always chart in ASC time order
+  // Make sure we always use ASC order for time series
   const rowsAsc = allRows.slice().sort((a, b) => a.Date.localeCompare(b.Date));
   const rows = sliceByDays(rowsAsc);
 
@@ -99,10 +109,9 @@ function renderChart() {
   const today = rows.map((r) => r.PredictionToday ?? 0);
   const tomorrow = rows.map((r) => r.PredictionTomorrow ?? 0);
 
-  if (chart) {
-    chart.destroy();
-    chart = null;
-  }
+  // IMPORTANT: Force chart container to be stable (CSS should fix height).
+  // We still avoid any extra resize triggers.
+  destroyChart();
 
   chart = new Chart(canvas, {
     type: "line",
@@ -113,18 +122,28 @@ function renderChart() {
         { label: "PredictionTomorrow (kWh)", data: tomorrow, tension: 0.25 },
       ],
     },
-    ooptions: {
-  responsive: true,
-  maintainAspectRatio: false,
-  animation: false,
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
 
-  // IMPORTANT: reduce resize feedback loops
-  events: ["mousemove", "mouseout", "click", "touchstart", "touchmove"],
-  plugins: { ... }
-}
+      // Hard stability: avoid continuous layout changes
+      animation: false,
+      parsing: false,
+      normalized: true,
+
+      // Reduce event processing (less redraw churn)
+      events: ["mousemove", "mouseout", "click", "touchstart", "touchmove"],
+
+      // Chart.js sometimes uses ResizeObserver. These settings help dampen loops.
+      resizeDelay: 250,
+
+      plugins: {
+        legend: { labels: { color: "#9fb0c3" } },
+        tooltip: { enabled: true },
+      },
       scales: {
         x: {
-          ticks: { color: "#9fb0c3", maxRotation: 0 },
+          ticks: { color: "#9fb0c3", maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
           grid: { color: "rgba(34,48,67,.4)" },
         },
         y: {
@@ -151,20 +170,15 @@ async function loadData() {
 }
 
 function wireUI() {
-  $("reloadBtn")?.addEventListener("click", () => loadData().catch((e) => alert(e.message)));
+  $("reloadBtn")?.addEventListener("click", () =>
+    loadData().catch((e) => alert(e.message))
+  );
   $("searchInput")?.addEventListener("input", renderTable);
   $("descToggle")?.addEventListener("change", renderTable);
   $("daysSelect")?.addEventListener("change", renderChart);
 
-  // Re-render chart on viewport resize (throttled by Chart.js resizeDelay)
-  window.addEventListener("resize", () => {
-    if (!chart) return;
-    // Chart.js handles this, but explicit update can help on some browsers
-    try {
-      chart.resize();
-      chart.update("none");
-    } catch (_) {}
-  });
+  // IMPORTANT: Do NOT add window resize listeners that call chart.resize()/update().
+  // With a fixed-height chart wrapper in CSS, Chart.js can handle resizing without loops.
 }
 
 wireUI();
