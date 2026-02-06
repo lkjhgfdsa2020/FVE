@@ -75,13 +75,11 @@ function renderTable() {
   tbody.innerHTML = "";
 
   for (const r of rows) {
-    const delta = (r.PredictionTomorrow ?? 0) - (r.PredictionToday ?? 0);
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${r.Date}</td>
       <td class="num">${formatNum(r.PredictionToday ?? NaN)}</td>
       <td class="num">${formatNum(r.PredictionTomorrow ?? NaN)}</td>
-      <td class="num">${formatNum(delta)}</td>
     `;
     tbody.appendChild(tr);
   }
