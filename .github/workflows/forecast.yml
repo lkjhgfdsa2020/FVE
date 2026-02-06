@@ -2,6 +2,9 @@ name: Daily PV forecast
 
 on:
   schedule:
+    # GitHub Actions cron runs in UTC.
+    # Europe/Prague 08:00 = 07:00 UTC (winter) or 06:00 UTC (summer)
+    # We run twice and gate inside the job so it only executes at 08:00 Prague.
     - cron: "0 6 * * *"
     - cron: "0 7 * * *"
   workflow_dispatch:
@@ -50,6 +53,37 @@ jobs:
 
           python -u pv_forecast.py
 
+      - name: Debug - show generated files
+        run: |
+          echo "=== PWD ==="
+          pwd
+          echo "=== ls -la ==="
+          ls -la
+
+          echo "=== ls forecasts ==="
+          ls -la forecasts || true
+          echo "=== ls forecast_outputs ==="
+          ls -la forecast_outputs || true
+
+          echo "=== find forecast_daily_summary.csv ==="
+          find . -maxdepth 5 -name "forecast_daily_summary.csv" -print || true
+
+          echo "=== tail forecasts/forecast_daily_summary.csv ==="
+          tail -n 40 forecasts/forecast_daily_summary.csv || true
+
+          echo "=== tail forecast_outputs/forecast_daily_summary.csv ==="
+          tail -n 40 forecast_outputs/forecast_daily_summary.csv || true
+
+          echo "=== git status (porcelain) ==="
+          git status --porcelain || true
+
+      - name: Debug - git diff
+        run: |
+          echo "=== git diff (forecasts/forecast_daily_summary.csv) ==="
+          git diff -- forecasts/forecast_daily_summary.csv || true
+          echo "=== git diff (forecast_outputs/forecast_daily_summary.csv) ==="
+          git diff -- forecast_outputs/forecast_daily_summary.csv || true
+
       - name: Commit forecast summary
         run: |
           if [ -f forecasts/forecast_daily_summary.csv ]; then
@@ -59,5 +93,6 @@ jobs:
             git commit -m "Update daily forecast summary" || echo "No changes to commit"
             git push
           else
-            echo "No summary file found, nothing to commit."
+            echo "No summary file found at forecasts/forecast_daily_summary.csv"
+            echo "If it was created elsewhere, fix pv_forecast.py to write to forecasts/forecast_daily_summary.csv"
           fi
