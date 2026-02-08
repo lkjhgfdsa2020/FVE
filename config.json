@@ -14,8 +14,7 @@
   "switch_search_end_hour": 16,
 
   "performance_ratio": 0.82,
+  "pr_calendar_path": "pr_calendar.json",
 
   "soc_8am": 20
 }
-
-
