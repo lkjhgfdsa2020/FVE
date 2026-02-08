@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # pv_forecast.py
 #
-# Daily PV forecast (today + tomorrow) using Open-Meteo hourly GTI (preferred) or shortwave radiation fallback,
-# plus a simple PR model (from pr_calendar.json or config.json).
+# Daily PV forecast (today + tomorrow) using Open-Meteo hourly irradiance (GTI preferred, SWR fallback),
+# PR model (from pr_calendar.json or config.json), and writes:
 #
-# Outputs:
 # - forecast_outputs/pv_hourly_forecast_YYYY-MM-DD.csv
 # - forecast_plots/pv_forecast_YYYY-MM-DD.png
 # - forecasts/forecast_daily_summary.csv  (upsert by Date)
@@ -12,11 +11,13 @@
 # Summary CSV columns:
 # Date,PredictionToday,ActualToday,PredictionTomorrow,SwitchOff,SwitchOn
 #
-# Switch window:
-# - monthly OFF budget = 20% of month hours
-# - allocate remaining budget across remaining days
-# - optionally weight by today's predicted kWh vs current month mean predicted kWh
-# - pick best contiguous window (maximizing sum pv_kw_pred) within daylight-ish hours
+# Switch window recommendation:
+# - monthly OFF budget = 20% of month hours (=> plant ON >= 80%)
+# - allocate remaining budget across remaining days, optionally weighted by today's strength
+# - BUT: do NOT recommend any switch window on low-production days (thresholds)
+#
+# Notes:
+# - "SwitchOff/SwitchOn" are recommendations only; empty strings mean "do not switch off".
 
 from __future__ import annotations
 
@@ -55,13 +56,16 @@ class Config:
     # Default PR if pr_calendar is missing
     performance_ratio: float = 0.82
 
-    # Optional per-day cap for switch-off window (hours). If omitted, we allow up to 24.
-    # Set this in config.json if you want an absolute cap.
+    # Optional per-day cap for switch-off window (hours). If omitted, allow up to 24.
     max_off_hours: float = 24.0
 
-    # Optional daylight window for searching best switch interval (local hours)
+    # Search window for switch recommendation (local hours)
     switch_search_start_hour: int = 7
     switch_search_end_hour: int = 19
+
+    # NEW: do not recommend switching on weak days
+    min_pred_kwh_for_switch: float = 4.0
+    min_peak_kw_for_switch: float = 1.0
 
     # Paths
     pr_calendar_path: str = "pr_calendar.json"
@@ -85,6 +89,8 @@ def load_config(path: str = "config.json") -> Config:
         max_off_hours=float(j.get("max_off_hours", 24.0)),
         switch_search_start_hour=int(j.get("switch_search_start_hour", 7)),
         switch_search_end_hour=int(j.get("switch_search_end_hour", 19)),
+        min_pred_kwh_for_switch=float(j.get("min_pred_kwh_for_switch", 4.0)),
+        min_peak_kw_for_switch=float(j.get("min_peak_kw_for_switch", 1.0)),
         pr_calendar_path=str(j.get("pr_calendar_path", "pr_calendar.json")),
         config_path=str(path),
     )
@@ -106,16 +112,14 @@ def _load_pr_calendar(path: str) -> Any | None:
 
 def pr_for_date(pr_cal: Any | None, cfg: Config, day: date) -> float:
     """
-    Tries to support common formats:
-    1) {"monthly": {"01": 0.75, "02": 0.78, ...}}
-    2) {"monthly": {"1": 0.75, "2": 0.78, ...}}
-    3) {"2025-03": 0.82, "2025-04": 0.84, ...}
-    4) [{"month":"2025-03","pr":0.82}, ...]
-    5) [{"month":3,"pr":0.82}, ...]  (applies to any year)
+    Supports common formats:
+      1) {"monthly": {"01": 0.75, "02": 0.78, ...}}
+      2) {"2025-03": 0.82, "2025-04": 0.84, ...}
+      3) [{"month":"2025-03","pr":0.82}, ...]
+      4) [{"month":3,"pr":0.82}, ...]  (applies to any year)
     Fallback: cfg.performance_ratio
     """
     default = float(cfg.performance_ratio)
-
     if pr_cal is None:
         return default
 
@@ -123,34 +127,25 @@ def pr_for_date(pr_cal: Any | None, cfg: Config, day: date) -> float:
     ym = f"{day.year:04d}-{day.month:02d}"
 
     try:
-        # dict formats
         if isinstance(pr_cal, dict):
-            # monthly dict under key
             if "monthly" in pr_cal and isinstance(pr_cal["monthly"], dict):
                 md = pr_cal["monthly"]
                 for k in (f"{m:02d}", str(m)):
                     if k in md:
                         return float(md[k])
 
-            # direct mapping by YYYY-MM
             if ym in pr_cal:
                 return float(pr_cal[ym])
 
-            # direct mapping by month only (rare)
             for k in (f"{m:02d}", str(m)):
                 if k in pr_cal:
                     return float(pr_cal[k])
 
-        # list formats
         if isinstance(pr_cal, list):
-            # try match YYYY-MM first
             for item in pr_cal:
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("month", "")).strip() == ym:
+                if isinstance(item, dict) and str(item.get("month", "")).strip() == ym:
                     return float(item.get("pr", default))
 
-            # fallback: match month number
             for item in pr_cal:
                 if not isinstance(item, dict):
                     continue
@@ -161,7 +156,6 @@ def pr_for_date(pr_cal: Any | None, cfg: Config, day: date) -> float:
                     return float(item.get("pr", default))
                 if isinstance(mm, str) and mm.strip() in (f"{m:02d}", str(m)):
                     return float(item.get("pr", default))
-
     except Exception:
         return default
 
@@ -174,17 +168,14 @@ def pr_for_date(pr_cal: Any | None, cfg: Config, day: date) -> float:
 
 def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
     """
-    Fetch hourly forecast. We prefer hourly "global_tilted_irradiance" (GTI) if available.
-    Some deployments may not return it; we fallback to "shortwave_radiation".
+    Fetch hourly forecast. Prefer hourly "global_tilted_irradiance" if available,
+    else fallback to "shortwave_radiation".
     """
     url = "https://api.open-meteo.com/v1/forecast"
 
     hourly_vars = [
-        # preferred
         "global_tilted_irradiance",
-        # fallback
         "shortwave_radiation",
-        # optional context
         "cloud_cover",
     ]
 
@@ -207,7 +198,6 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
     df = pd.DataFrame({"time": times})
     df["date"] = df["time"].dt.date
 
-    # Some keys may be missing depending on API return
     gti = j["hourly"].get("global_tilted_irradiance", None)
     swr = j["hourly"].get("shortwave_radiation", None)
 
@@ -225,9 +215,7 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
     else:
         df["cloud_cover"] = pd.NA
 
-    # Keep only today + tomorrow
-    df = df.sort_values("time").reset_index(drop=True)
-    return df
+    return df.sort_values("time").reset_index(drop=True)
 
 
 # ---------------------------
@@ -235,12 +223,7 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
 # ---------------------------
 
 def pv_kw_from_irr(cfg: Config, irr_wm2: float, pr: float) -> float:
-    """
-    Simple linear model:
-    PV(kW) ~ pv_kwp * (irradiance / 1000) * PR
-    """
-    if irr_wm2 is None:
-        return 0.0
+    """PV(kW) ~ pv_kwp * (irradiance / 1000) * PR"""
     try:
         x = float(irr_wm2)
         if x <= 0:
@@ -274,7 +257,6 @@ def _parse_hhmm(s: Any) -> dtime | None:
 
 
 def _hours_between_hhmm(off_s: Any, on_s: Any) -> float:
-    """Duration in hours within the same day. If invalid -> 0."""
     t1 = _parse_hhmm(off_s)
     t2 = _parse_hhmm(on_s)
     if not t1 or not t2:
@@ -310,38 +292,29 @@ def upsert_daily_forecast_summary(
     out_path = Path(out_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    new_row = pd.DataFrame(
-        [{
-            "Date": run_day.isoformat(),
-            "PredictionToday": _round2(pred_today),
-            "ActualToday": (pd.NA if actual_today is None else _round2(actual_today)),
-            "PredictionTomorrow": _round2(pred_tomorrow),
-            "SwitchOff": (switch_off or ""),
-            "SwitchOn": (switch_on or ""),
-        }]
-    )
-
     required = ["Date", "PredictionToday", "ActualToday", "PredictionTomorrow", "SwitchOff", "SwitchOn"]
+
+    new_row = pd.DataFrame([{
+        "Date": run_day.isoformat(),
+        "PredictionToday": _round2(pred_today),
+        "ActualToday": (pd.NA if actual_today is None else _round2(actual_today)),
+        "PredictionTomorrow": _round2(pred_tomorrow),
+        "SwitchOff": (switch_off or ""),
+        "SwitchOn": (switch_on or ""),
+    }])
 
     if out_path.exists():
         old = pd.read_csv(out_path)
-
-        # Ensure required columns exist
         for c in required:
             if c not in old.columns:
                 old[c] = pd.NA
-
         old["Date"] = old["Date"].astype(str)
-
-        # Remove old row for run_day and append new row
         old = old[old["Date"] != run_day.isoformat()]
         merged = pd.concat([old, new_row], ignore_index=True)
     else:
         merged = new_row
 
     merged = merged[required].sort_values("Date")
-
-    # Write
     merged.to_csv(out_path, index=False)
     return out_path
 
@@ -358,16 +331,13 @@ def recommend_switch_window(
     summary_existing: pd.DataFrame | None,
 ) -> tuple[str, str]:
     """
-    Returns (SwitchOff, SwitchOn) in 'HH:MM' local time strings, or ("","") if not recommended.
-
-    Rules:
-    - monthly off-budget = 20% of month hours
-    - compute already planned off-hours from existing summary CSV
-    - allocate remaining budget to today:
-        base = remaining_budget / remaining_days
-        weight by today's kWh vs month mean predicted kWh (clamped 0.5..2.0)
-    - choose best contiguous window length L hours maximizing sum pv_kw_pred within search hours
+    Returns (SwitchOff, SwitchOn) in 'HH:MM' local time, or ("","") if not recommended.
     """
+
+    # --- NEW: hard guard for low-production days ---
+    if float(pred_today_kwh) < float(cfg.min_pred_kwh_for_switch):
+        return ("", "")
+
     year, month = run_day.year, run_day.month
     days_in_month = calendar.monthrange(year, month)[1]
     month_key = f"{year:04d}-{month:02d}"
@@ -392,19 +362,15 @@ def recommend_switch_window(
                         lambda r: _hours_between_hhmm(r.get("SwitchOff"), r.get("SwitchOn")), axis=1
                     ).sum()
                 )
-
             if "PredictionToday" in s_month.columns:
                 preds = pd.to_numeric(s_month["PredictionToday"], errors="coerce").dropna()
                 if len(preds) > 0:
                     month_mean_pred = float(preds.mean())
 
     remaining_budget = max(0.0, monthly_off_budget_hours - used_off_hours)
-
-    # Remaining days including today
     remaining_days = max(1, (days_in_month - run_day.day + 1))
     base_alloc = remaining_budget / remaining_days  # hours/day
 
-    # Weight by strength of today vs month mean
     if month_mean_pred is None or month_mean_pred <= 0:
         weight = 1.0
     else:
@@ -412,11 +378,9 @@ def recommend_switch_window(
         weight = max(0.5, min(2.0, weight))
 
     target_hours = base_alloc * weight
-
-    # Respect optional per-day cap
     target_hours = min(float(cfg.max_off_hours), target_hours)
 
-    # If no budget -> no switching
+    # No meaningful budget -> no switching
     if target_hours <= 0.25:
         return ("", "")
 
@@ -430,18 +394,23 @@ def recommend_switch_window(
 
     today = today.sort_values("time")
 
-    # Search window (local)
+    # --- NEW: peak guard (avoid long windows on flat/near-zero curves) ---
+    peak_kw = float(pd.to_numeric(today["pv_kw_pred"], errors="coerce").fillna(0.0).max())
+    if peak_kw < float(cfg.min_peak_kw_for_switch):
+        return ("", "")
+
+    # Search within typical "daylight" window
     start_h = int(cfg.switch_search_start_hour)
     end_h = int(cfg.switch_search_end_hour)
-    today = today[(today["time"].dt.hour >= start_h) & (today["time"].dt.hour <= end_h)].copy()
+    search = today[(today["time"].dt.hour >= start_h) & (today["time"].dt.hour <= end_h)].copy()
 
-    if len(today) < L:
-        # If not enough points in search window, try full day
-        today = hourly_df[hourly_df["date"] == run_day].sort_values("time").copy()
-        if len(today) < L:
+    # If search window too narrow for L, fallback to whole day (but still require enough points)
+    if len(search) < L:
+        search = today.copy()
+        if len(search) < L:
             return ("", "")
 
-    pv = pd.to_numeric(today["pv_kw_pred"], errors="coerce").fillna(0.0).to_numpy()
+    pv = pd.to_numeric(search["pv_kw_pred"], errors="coerce").fillna(0.0).to_numpy()
 
     best_sum = -1.0
     best_i = None
@@ -454,35 +423,29 @@ def recommend_switch_window(
     if best_i is None:
         return ("", "")
 
-    start_dt = today.iloc[best_i]["time"].to_pydatetime()
-    end_dt = today.iloc[best_i + L - 1]["time"].to_pydatetime() + timedelta(hours=1)
+    start_dt = search.iloc[best_i]["time"].to_pydatetime()
+    end_dt = search.iloc[best_i + L - 1]["time"].to_pydatetime() + timedelta(hours=1)
 
     return (start_dt.strftime("%H:%M"), end_dt.strftime("%H:%M"))
 
 
 # ---------------------------
-# Main forecasting pipeline
+# Forecast pipeline
 # ---------------------------
 
 def build_hourly_forecast(cfg: Config, pr_cal: Any | None, forecast_df: pd.DataFrame) -> pd.DataFrame:
     df = forecast_df.copy()
-    # add PR used per row (by date)
     df["pr_used"] = df["date"].apply(lambda d: pr_for_date(pr_cal, cfg, d))
-
-    # pv power prediction
     df["pv_kw_pred"] = [
         pv_kw_from_irr(cfg, irr, pr)
         for irr, pr in zip(df["irr_wm2"].tolist(), df["pr_used"].tolist())
     ]
-
     return df
 
 
 def daily_kwh(df_hourly: pd.DataFrame) -> pd.DataFrame:
-    # hourly values are kW for the hour → kWh per hour ~ kW * 1h
     g = df_hourly.groupby("date", as_index=False)["pv_kw_pred"].sum()
-    g = g.rename(columns={"pv_kw_pred": "pv_kwh_pred"})
-    return g
+    return g.rename(columns={"pv_kw_pred": "pv_kwh_pred"})
 
 
 def save_hourly_csv(df_hourly: pd.DataFrame, run_day: date) -> Path:
@@ -490,11 +453,8 @@ def save_hourly_csv(df_hourly: pd.DataFrame, run_day: date) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"pv_hourly_forecast_{run_day.isoformat()}.csv"
 
-    # Keep a clean export
     export = df_hourly.copy()
     export["time"] = export["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    export["pv_kw_pred"] = export["pv_kw_pred"].astype(float)
-
     export.to_csv(out_path, index=False)
     return out_path
 
@@ -504,7 +464,6 @@ def save_plot(df_hourly: pd.DataFrame, run_day: date) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"pv_forecast_{run_day.isoformat()}.png"
 
-    # plot today + tomorrow
     df = df_hourly.copy()
     plt.figure(figsize=(12, 5))
     plt.plot(df["time"], df["pv_kw_pred"], label="PV kW pred")
@@ -520,40 +479,29 @@ def save_plot(df_hourly: pd.DataFrame, run_day: date) -> Path:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--date", help="Run date YYYY-MM-DD (default: today in local TZ)", default=None)
+    ap.add_argument("--date", help="Run date YYYY-MM-DD (default: today)", default=None)
     ap.add_argument("--out-summary", help="Summary CSV path", default="forecasts/forecast_daily_summary.csv")
     args = ap.parse_args()
 
     cfg = load_config("config.json")
     pr_cal = _load_pr_calendar(cfg.pr_calendar_path)
 
-    # Determine run day (local) – for Actions this is fine because TZ in workflow is Prague
-    if args.date:
-        run_day = datetime.strptime(args.date, "%Y-%m-%d").date()
-    else:
-        run_day = date.today()
+    run_day = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else date.today()
 
-    # 1) Fetch forecast
     raw = fetch_open_meteo_forecast(cfg)
-
-    # 2) Build hourly PV model
     hourly = build_hourly_forecast(cfg, pr_cal, raw)
-
-    # 3) Daily kWh
     daily = daily_kwh(hourly)
 
-    # Only keep today + tomorrow rows
     today = run_day
     tomorrow = run_day + timedelta(days=1)
 
     day_rows = daily[daily["date"].isin([today, tomorrow])].copy()
     if day_rows.empty or len(day_rows) < 2:
-        raise RuntimeError("Did not get both today and tomorrow from forecast daily aggregation.")
+        raise RuntimeError("Did not get both today and tomorrow from forecast aggregation.")
 
     today_kwh = float(day_rows.loc[day_rows["date"] == today, "pv_kwh_pred"].iloc[0])
     tomorrow_kwh = float(day_rows.loc[day_rows["date"] == tomorrow, "pv_kwh_pred"].iloc[0])
 
-    # Print console summary
     print("\nPredikce denní výroby (kWh):")
     print(day_rows.to_string(index=False))
 
@@ -563,18 +511,15 @@ def main() -> None:
     print("\nPoužité PR (median za den):")
     print(pr_used_df.to_string(index=False))
 
-    # 4) Save hourly CSV + plot (useful for debugging)
     hourly_csv = save_hourly_csv(hourly, run_day)
     print(f"\nCSV uloženo: {hourly_csv.as_posix()}")
 
     plot_path = save_plot(hourly, run_day)
     print(f"Graf uložen: {plot_path.as_posix()}")
 
-    # 5) Load existing summary for budget logic
     summary_path = Path(args.out_summary)
     existing = _load_existing_summary(summary_path)
 
-    # 6) Recommend switch window (for TODAY only)
     sw_off, sw_on = recommend_switch_window(
         hourly_df=hourly,
         run_day=today,
@@ -583,7 +528,6 @@ def main() -> None:
         summary_existing=existing,
     )
 
-    # 7) Upsert daily summary (ActualToday stays empty for now)
     out_path = upsert_daily_forecast_summary(
         run_day=today,
         pred_today=today_kwh,
