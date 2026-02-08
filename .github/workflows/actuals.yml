@@ -1,0 +1,66 @@
+name: Daily PV actuals (SolaX)
+
+on:
+  schedule:
+    - cron: "30 20 * * *"   # summer (CEST)
+    - cron: "30 21 * * *"   # winter (CET)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even if not within target window"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  actuals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run actuals update
+        env:
+          TZ: Europe/Prague
+          SOLAX_BASE_URL: ${{ secrets.SOLAX_BASE_URL }}
+          SOLAX_TOKEN_ID: ${{ secrets.SOLAX_TOKEN_ID }}
+          SOLAX_WIFI_SN: ${{ secrets.SOLAX_WIFI_SN }}
+        run: |
+          echo "Local time (Prague): $(date)"
+          FORCE="${{ github.event.inputs.force }}"
+          echo "Force mode: ${FORCE:-false}"
+
+          if [ "$FORCE" != "true" ]; then
+            H=$(date +%H)
+            # allow 21:00–23:59 Prague (±~1h around 22:30)
+            if [ "$H" -lt "21" ] || [ "$H" -gt "23" ]; then
+              echo "Not within 21:00–23:59 Europe/Prague, skipping."
+              exit 0
+            fi
+          fi
+
+          python -u solax_update_actuals.py \
+            --base-url "$SOLAX_BASE_URL" \
+            --token-id "$SOLAX_TOKEN_ID" \
+            --wifi-sn "$SOLAX_WIFI_SN" \
+            --summary forecasts/forecast_daily_summary.csv
+
+      - name: Commit updated summary
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add forecasts/forecast_daily_summary.csv
+          git commit -m "Update ActualToday from SolaX" || echo "No changes to commit"
+          git push
