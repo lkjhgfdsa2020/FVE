@@ -1,6 +1,7 @@
 // ui/app.js
 // Dashboard for forecasts/forecast_daily_summary.csv
-// Hard-stabilized chart rendering to avoid "growing height" loops.
+// Table columns: Date, PredictionToday, ActualToday, PredictionTomorrow
+// Chart remains Today vs Tomorrow predictions (Actual can be added later if you want).
 
 const CSV_PATH = "../forecasts/forecast_daily_summary.csv"; // relative to /ui/
 
@@ -27,6 +28,7 @@ function parseCSV(text) {
     .map((r) => ({
       Date: (r.Date || "").trim(),
       PredictionToday: toNum(r.PredictionToday),
+      ActualToday: toNum(r.ActualToday),
       PredictionTomorrow: toNum(r.PredictionTomorrow),
     }))
     .filter((r) => r.Date);
@@ -79,13 +81,13 @@ function renderTable() {
     tr.innerHTML = `
       <td>${r.Date}</td>
       <td class="num">${formatNum(r.PredictionToday ?? NaN)}</td>
+      <td class="num">${formatNum(r.ActualToday ?? NaN)}</td>
       <td class="num">${formatNum(r.PredictionTomorrow ?? NaN)}</td>
     `;
     tbody.appendChild(tr);
   }
 }
 
-// Destroy chart safely
 function destroyChart() {
   if (!chart) return;
   try {
@@ -94,12 +96,13 @@ function destroyChart() {
   chart = null;
 }
 
-// Create chart with extra-stable options to avoid resize feedback loops
+// Create chart with extra-stable options to avoid resize feedback loops.
+// Uses fixed-height wrapper in CSS (.chart-wrap).
 function renderChart() {
   const canvas = $("chart");
   if (!canvas) return;
 
-  // Make sure we always use ASC order for time series
+  // Always chart in ASC order
   const rowsAsc = allRows.slice().sort((a, b) => a.Date.localeCompare(b.Date));
   const rows = sliceByDays(rowsAsc);
 
@@ -107,8 +110,6 @@ function renderChart() {
   const today = rows.map((r) => r.PredictionToday ?? 0);
   const tomorrow = rows.map((r) => r.PredictionTomorrow ?? 0);
 
-  // IMPORTANT: Force chart container to be stable (CSS should fix height).
-  // We still avoid any extra resize triggers.
   destroyChart();
 
   chart = new Chart(canvas, {
@@ -124,16 +125,14 @@ function renderChart() {
       responsive: true,
       maintainAspectRatio: false,
 
-      // Hard stability: avoid continuous layout changes
+      // Stability
       animation: false,
       parsing: false,
       normalized: true,
-
-      // Reduce event processing (less redraw churn)
-      events: ["mousemove", "mouseout", "click", "touchstart", "touchmove"],
-
-      // Chart.js sometimes uses ResizeObserver. These settings help dampen loops.
       resizeDelay: 250,
+
+      // Reduce event churn
+      events: ["mousemove", "mouseout", "click", "touchstart", "touchmove"],
 
       plugins: {
         legend: { labels: { color: "#9fb0c3" } },
@@ -168,15 +167,13 @@ async function loadData() {
 }
 
 function wireUI() {
-  $("reloadBtn")?.addEventListener("click", () =>
-    loadData().catch((e) => alert(e.message))
-  );
+  $("reloadBtn")?.addEventListener("click", () => loadData().catch((e) => alert(e.message)));
   $("searchInput")?.addEventListener("input", renderTable);
   $("descToggle")?.addEventListener("change", renderTable);
   $("daysSelect")?.addEventListener("change", renderChart);
 
-  // IMPORTANT: Do NOT add window resize listeners that call chart.resize()/update().
-  // With a fixed-height chart wrapper in CSS, Chart.js can handle resizing without loops.
+  // IMPORTANT: no window resize handler calling chart.resize()/update()
+  // Fixed-height wrapper + Chart.js internal resizing avoids feedback loops.
 }
 
 wireUI();
