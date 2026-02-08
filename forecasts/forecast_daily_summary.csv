@@ -1,3 +1,4 @@
-Date,PredictionToday,PredictionTomorrow
-2026-02-05,2.6403444,2.1323036
-2026-02-06,2.0357216,2.7065905333333333
+Date,PredictionToday,ActualToday, PredictionTomorrow, SwitchOff, SwitchOn
+2026-02-05,2.64,,2.13,,
+2026-02-06,2.03,,2.70,,
+2026-02-08,3.21,,2.87,11:00,15:00
