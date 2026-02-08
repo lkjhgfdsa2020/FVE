@@ -9,9 +9,13 @@
 
   "export_limit_kw": 3.65,
   "baseload_kw": 0.50,
-  "max_off_hours": 4,
+  "max_off_hours": 10,
+  "switch_search_start_hour": 8,
+  "switch_search_end_hour": 16
 
   "performance_ratio": 0.82,
 
   "soc_8am": 20
 }
+
+
