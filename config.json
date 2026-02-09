@@ -9,6 +9,9 @@
 
   "export_limit_kw": 3.65,
   "baseload_kw": 0.50,
+  "battery_kwh_total": 11.6,
+  "battery_usable_frac": 0.90,
+  "target_soc_evening": 0.85,
   "max_off_hours": 10,
   "switch_search_start_hour": 8,
   "switch_search_end_hour": 16,
