@@ -11,13 +11,20 @@
 # Summary CSV columns:
 # Date,PredictionToday,ActualToday,PredictionTomorrow,SwitchOff,SwitchOn
 #
-# Switch window recommendation:
-# - monthly OFF budget = 20% of month hours (=> plant ON >= 80%)
-# - allocate remaining budget across remaining days, optionally weighted by today's strength
-# - BUT: do NOT recommend any switch window on low-production days (thresholds)
+# Switch window recommendation (SMART):
+# - Models your controller behavior in Backup mode:
+#   ON  (controller connected): House -> Charge battery -> Export ONLY when battery is 100%
+#   OFF (controller disconnected): House -> Export (up to limit) -> Charge battery from remaining
 #
-# Notes:
-# - "SwitchOff/SwitchOn" are recommendations only; empty strings mean "do not switch off".
+# - Chooses the best OFF window by hourly simulation & scoring:
+#   maximize export, minimize spill/curtailment, keep evening SoC target (default 90%),
+#   and obey monthly OFF budget (plant ON >= 80% of month).
+#
+# - SoC is fetched from SolaXCloud API (realtimeInfo/get) if env vars exist:
+#   SOLAX_BASE_URL, SOLAX_TOKEN_ID, SOLAX_WIFI_SN
+#   If SoC is null/unavailable -> default 20%.
+#
+# SwitchOff/SwitchOn are empty strings if we recommend not switching off at all.
 
 from __future__ import annotations
 
@@ -27,7 +34,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, time as dtime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pandas as pd
 import requests
@@ -56,16 +63,23 @@ class Config:
     # Default PR if pr_calendar is missing
     performance_ratio: float = 0.82
 
-    # Optional per-day cap for switch-off window (hours). If omitted, allow up to 24.
-    max_off_hours: float = 24.0
+    # Export + house baseline
+    export_limit_kw: float = 3.65
+    baseload_kw: float = 0.50
 
-    # Search window for switch recommendation (local hours)
-    switch_search_start_hour: int = 7
-    switch_search_end_hour: int = 19
+    # Battery model
+    battery_kwh_total: float = 11.6
+    battery_usable_frac: float = 0.90  # usable = total * frac
+    target_soc_evening: float = 0.90   # target at end of day (usable fraction)
+    soc_default_pct: float = 20.0      # used if API returns null/unavailable
 
-    # NEW: do not recommend switching on weak days
-    min_pred_kwh_for_switch: float = 4.0
-    min_peak_kw_for_switch: float = 1.0
+    # Switch window constraints
+    max_off_hours: float = 10.0
+    switch_search_start_hour: int = 8
+    switch_search_end_hour: int = 16
+
+    # Only consider switching on strong days
+    min_pred_kwh_for_switch: float = 20.0
 
     # Paths
     pr_calendar_path: str = "pr_calendar.json"
@@ -86,11 +100,16 @@ def load_config(path: str = "config.json") -> Config:
         tilt_deg=float(j.get("tilt_deg", 25.0)),
         azimuth_deg_from_north=float(j.get("azimuth_deg_from_north", 221.0)),
         performance_ratio=float(j.get("performance_ratio", 0.82)),
-        max_off_hours=float(j.get("max_off_hours", 24.0)),
-        switch_search_start_hour=int(j.get("switch_search_start_hour", 7)),
-        switch_search_end_hour=int(j.get("switch_search_end_hour", 19)),
-        min_pred_kwh_for_switch=float(j.get("min_pred_kwh_for_switch", 4.0)),
-        min_peak_kw_for_switch=float(j.get("min_peak_kw_for_switch", 1.0)),
+        export_limit_kw=float(j.get("export_limit_kw", 3.65)),
+        baseload_kw=float(j.get("baseload_kw", 0.50)),
+        battery_kwh_total=float(j.get("battery_kwh_total", 11.6)),
+        battery_usable_frac=float(j.get("battery_usable_frac", 0.90)),
+        target_soc_evening=float(j.get("target_soc_evening", 0.90)),
+        soc_default_pct=float(j.get("soc_default_pct", 20.0)),
+        max_off_hours=float(j.get("max_off_hours", 10.0)),
+        switch_search_start_hour=int(j.get("switch_search_start_hour", 8)),
+        switch_search_end_hour=int(j.get("switch_search_end_hour", 16)),
+        min_pred_kwh_for_switch=float(j.get("min_pred_kwh_for_switch", 20.0)),
         pr_calendar_path=str(j.get("pr_calendar_path", "pr_calendar.json")),
         config_path=str(path),
     )
@@ -160,6 +179,51 @@ def pr_for_date(pr_cal: Any | None, cfg: Config, day: date) -> float:
         return default
 
     return default
+
+
+# ---------------------------
+# SolaXCloud SoC
+# ---------------------------
+
+def fetch_solax_soc_percent(cfg: Config) -> float:
+    """
+    Fetch SoC (%) from SolaXCloud realtimeInfo/get (env vars).
+    If missing / null / error => fallback cfg.soc_default_pct.
+    """
+    import os
+
+    base_url = os.getenv("SOLAX_BASE_URL", "").strip()
+    token_id = os.getenv("SOLAX_TOKEN_ID", "").strip()
+    wifi_sn = os.getenv("SOLAX_WIFI_SN", "").strip()
+
+    fallback = float(cfg.soc_default_pct)
+
+    if not (base_url and token_id and wifi_sn):
+        return fallback
+
+    try:
+        url = f"{base_url.rstrip('/')}/api/v2/dataAccess/realtimeInfo/get"
+        headers = {"tokenId": token_id, "Content-Type": "application/json"}
+        payload = {"wifiSn": wifi_sn}
+
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        j = r.json()
+
+        if not j.get("success", False):
+            return fallback
+
+        result = j.get("result", {}) or {}
+        soc = result.get("soc", None)
+        if soc is None:
+            return fallback
+
+        v = float(soc)
+        if v < 0:
+            return fallback
+        return min(100.0, v)
+    except Exception:
+        return fallback
 
 
 # ---------------------------
@@ -234,199 +298,194 @@ def pv_kw_from_irr(cfg: Config, irr_wm2: float, pr: float) -> float:
 
 
 # ---------------------------
-# Summary CSV helpers
+# Switch window recommendation (SMART simulation)
 # ---------------------------
 
-def _round2(x: float) -> float:
-    try:
-        return float(round(float(x), 2))
-    except Exception:
-        return float("nan")
+def _month_off_budget_hours(year: int, month: int) -> float:
+    days_in_month = calendar.monthrange(year, month)[1]
+    return 0.20 * days_in_month * 24.0  # OFF <= 20% => ON >= 80%
 
 
-def _parse_hhmm(s: Any) -> dtime | None:
-    if s is None:
-        return None
-    s = str(s).strip()
-    if not s:
-        return None
-    try:
-        return datetime.strptime(s, "%H:%M").time()
-    except Exception:
-        return None
-
-
-def _hours_between_hhmm(off_s: Any, on_s: Any) -> float:
-    t1 = _parse_hhmm(off_s)
-    t2 = _parse_hhmm(on_s)
-    if not t1 or not t2:
+def _compute_used_off_hours(summary_existing: pd.DataFrame | None, month_key: str) -> float:
+    if summary_existing is None or summary_existing.empty:
         return 0.0
-    dt1 = datetime.combine(date(2000, 1, 1), t1)
-    dt2 = datetime.combine(date(2000, 1, 1), t2)
-    if dt2 <= dt1:
+    s = summary_existing.copy()
+    if "Date" not in s.columns:
         return 0.0
-    return (dt2 - dt1).total_seconds() / 3600.0
+    s["Date"] = s["Date"].astype(str)
+    s_month = s[s["Date"].str.startswith(month_key)].copy()
+    if s_month.empty:
+        return 0.0
+    if "SwitchOff" not in s_month.columns or "SwitchOn" not in s_month.columns:
+        return 0.0
+    return float(
+        s_month.apply(lambda r: _hours_between_hhmm(r.get("SwitchOff"), r.get("SwitchOn")), axis=1).sum()
+    )
 
 
-def _load_existing_summary(path: Path) -> pd.DataFrame | None:
-    if not path.exists():
-        return None
-    try:
-        df = pd.read_csv(path)
-        if "Date" in df.columns:
-            df["Date"] = df["Date"].astype(str)
-        return df
-    except Exception:
-        return None
+def _simulate_day(
+    pv_kw: list[float],
+    hours: list[int],
+    off_start_idx: int | None,
+    off_len: int,
+    cfg: Config,
+    soc_start_pct: float,
+) -> dict[str, Any]:
+    cap = float(cfg.battery_kwh_total) * float(cfg.battery_usable_frac)  # usable kWh
+    cap = max(0.1, cap)
+
+    soc0 = max(0.0, min(100.0, float(soc_start_pct)))
+    E = (soc0 / 100.0) * cap  # usable energy (kWh)
+
+    export_kwh = 0.0
+    spill_kwh = 0.0
+    first_full_hour: Optional[int] = None
+
+    off_end_idx = None
+    if off_start_idx is not None and off_len > 0:
+        off_end_idx = off_start_idx + off_len
+
+    for i, pv in enumerate(pv_kw):
+        h = hours[i]
+        pv = max(0.0, float(pv))
+
+        after_load = max(0.0, pv - float(cfg.baseload_kw))
+        in_off = False
+        if off_start_idx is not None and off_end_idx is not None:
+            in_off = (i >= off_start_idx) and (i < off_end_idx)
+
+        batt_rem = max(0.0, cap - E)
+
+        if in_off:
+            export = min(float(cfg.export_limit_kw), after_load)
+            rem = max(0.0, after_load - export)
+            charge = min(rem, batt_rem)
+            spill = max(0.0, rem - charge)
+        else:
+            charge = min(after_load, batt_rem)
+            rem = max(0.0, after_load - charge)
+            if batt_rem <= 1e-9:
+                export = min(float(cfg.export_limit_kw), after_load)
+                spill = max(0.0, after_load - export)
+            else:
+                export = 0.0
+                spill = rem
+
+        E = min(cap, E + charge)
+        export_kwh += export
+        spill_kwh += spill
+
+        if first_full_hour is None and E >= cap - 1e-6:
+            first_full_hour = int(h)
+
+    return {
+        "export_kwh": export_kwh,
+        "spill_kwh": spill_kwh,
+        "soc_end_frac": E / cap,
+        "first_full_hour": first_full_hour,
+    }
 
 
-def upsert_daily_forecast_summary(
-    run_day: date,
-    pred_today: float,
-    pred_tomorrow: float,
-    actual_today: float | None = None,
-    switch_off: str = "",
-    switch_on: str = "",
-    out_csv: str = "forecasts/forecast_daily_summary.csv",
-) -> Path:
-    out_path = Path(out_csv)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    required = ["Date", "PredictionToday", "ActualToday", "PredictionTomorrow", "SwitchOff", "SwitchOn"]
-
-    new_row = pd.DataFrame([{
-        "Date": run_day.isoformat(),
-        "PredictionToday": _round2(pred_today),
-        "ActualToday": (pd.NA if actual_today is None else _round2(actual_today)),
-        "PredictionTomorrow": _round2(pred_tomorrow),
-        "SwitchOff": (switch_off or ""),
-        "SwitchOn": (switch_on or ""),
-    }])
-
-    if out_path.exists():
-        old = pd.read_csv(out_path)
-        for c in required:
-            if c not in old.columns:
-                old[c] = pd.NA
-        old["Date"] = old["Date"].astype(str)
-        old = old[old["Date"] != run_day.isoformat()]
-        merged = pd.concat([old, new_row], ignore_index=True)
-    else:
-        merged = new_row
-
-    merged = merged[required].sort_values("Date")
-    merged.to_csv(out_path, index=False)
-    return out_path
-
-
-# ---------------------------
-# Switch window recommendation
-# ---------------------------
-
-def recommend_switch_window(
+def recommend_switch_window_smart(
     hourly_df: pd.DataFrame,
     run_day: date,
     pred_today_kwh: float,
     cfg: Config,
     summary_existing: pd.DataFrame | None,
+    soc_start_pct: float,
 ) -> tuple[str, str]:
-    """
-    Returns (SwitchOff, SwitchOn) in 'HH:MM' local time, or ("","") if not recommended.
-    """
-
-    # --- NEW: hard guard for low-production days ---
     if float(pred_today_kwh) < float(cfg.min_pred_kwh_for_switch):
         return ("", "")
-
-    year, month = run_day.year, run_day.month
-    days_in_month = calendar.monthrange(year, month)[1]
-    month_key = f"{year:04d}-{month:02d}"
-
-    monthly_off_budget_hours = 0.20 * days_in_month * 24.0
-
-    used_off_hours = 0.0
-    month_mean_pred = None
-
-    if summary_existing is not None and not summary_existing.empty:
-        s = summary_existing.copy()
-        if "Date" in s.columns:
-            s["Date"] = s["Date"].astype(str)
-            s_month = s[s["Date"].str.startswith(month_key)]
-        else:
-            s_month = pd.DataFrame()
-
-        if not s_month.empty:
-            if "SwitchOff" in s_month.columns and "SwitchOn" in s_month.columns:
-                used_off_hours = float(
-                    s_month.apply(
-                        lambda r: _hours_between_hhmm(r.get("SwitchOff"), r.get("SwitchOn")), axis=1
-                    ).sum()
-                )
-            if "PredictionToday" in s_month.columns:
-                preds = pd.to_numeric(s_month["PredictionToday"], errors="coerce").dropna()
-                if len(preds) > 0:
-                    month_mean_pred = float(preds.mean())
-
-    remaining_budget = max(0.0, monthly_off_budget_hours - used_off_hours)
-    remaining_days = max(1, (days_in_month - run_day.day + 1))
-    base_alloc = remaining_budget / remaining_days  # hours/day
-
-    if month_mean_pred is None or month_mean_pred <= 0:
-        weight = 1.0
-    else:
-        weight = float(pred_today_kwh) / float(month_mean_pred)
-        weight = max(0.5, min(2.0, weight))
-
-    target_hours = base_alloc * weight
-    target_hours = min(float(cfg.max_off_hours), target_hours)
-
-    # No meaningful budget -> no switching
-    if target_hours <= 0.25:
-        return ("", "")
-
-    # Use integer-hour window for robustness
-    L = int(round(target_hours))
-    L = max(1, L)
 
     today = hourly_df[hourly_df["date"] == run_day].copy()
     if today.empty:
         return ("", "")
 
     today = today.sort_values("time")
-
-    # --- NEW: peak guard (avoid long windows on flat/near-zero curves) ---
-    peak_kw = float(pd.to_numeric(today["pv_kw_pred"], errors="coerce").fillna(0.0).max())
-    if peak_kw < float(cfg.min_peak_kw_for_switch):
+    pv = pd.to_numeric(today["pv_kw_pred"], errors="coerce").fillna(0.0).tolist()
+    hours = today["time"].dt.hour.astype(int).tolist()
+    if len(pv) < 8:
         return ("", "")
 
-    # Search within typical "daylight" window
+    year, month = run_day.year, run_day.month
+    month_key = f"{year:04d}-{month:02d}"
+    budget = _month_off_budget_hours(year, month)
+    used = _compute_used_off_hours(summary_existing, month_key)
+    remaining_budget = max(0.0, budget - used)
+
+    days_in_month = calendar.monthrange(year, month)[1]
+    remaining_days = max(1, days_in_month - run_day.day + 1)
+
+    month_mean_pred = None
+    if (
+        summary_existing is not None
+        and not summary_existing.empty
+        and "Date" in summary_existing.columns
+        and "PredictionToday" in summary_existing.columns
+    ):
+        s = summary_existing.copy()
+        s["Date"] = s["Date"].astype(str)
+        s_month = s[s["Date"].str.startswith(month_key)].copy()
+        preds = pd.to_numeric(s_month.get("PredictionToday", pd.Series([], dtype=float)), errors="coerce").dropna()
+        if len(preds) > 0:
+            month_mean_pred = float(preds.mean())
+
+    if month_mean_pred and month_mean_pred > 0:
+        weight = float(pred_today_kwh) / float(month_mean_pred)
+        weight = max(0.6, min(2.2, weight))
+    else:
+        weight = 1.0
+
+    base_alloc = remaining_budget / remaining_days
+    alloc_today = min(float(cfg.max_off_hours), base_alloc * weight, remaining_budget)
+    if alloc_today < 0.75:
+        return ("", "")
+
+    maxL = max(1, int(round(alloc_today)))
+
     start_h = int(cfg.switch_search_start_hour)
     end_h = int(cfg.switch_search_end_hour)
-    search = today[(today["time"].dt.hour >= start_h) & (today["time"].dt.hour <= end_h)].copy()
+    candidates: list[int] = [i for i, h in enumerate(hours) if start_h <= h <= end_h]
+    if not candidates:
+        candidates = list(range(len(pv)))
 
-    # If search window too narrow for L, fallback to whole day (but still require enough points)
-    if len(search) < L:
-        search = today.copy()
-        if len(search) < L:
-            return ("", "")
+    base = _simulate_day(pv, hours, None, 0, cfg, soc_start_pct)
 
-    pv = pd.to_numeric(search["pv_kw_pred"], errors="coerce").fillna(0.0).to_numpy()
+    def score(sim: dict[str, Any]) -> float:
+        export = float(sim["export_kwh"])
+        spill = float(sim["spill_kwh"])
+        end_frac = float(sim["soc_end_frac"])
+        full_hour = sim.get("first_full_hour", None)
 
-    best_sum = -1.0
-    best_i = None
-    for i in range(0, len(pv) - L + 1):
-        s = float(pv[i : i + L].sum())
-        if s > best_sum:
-            best_sum = s
-            best_i = i
+        target = float(cfg.target_soc_evening)
+        deficit = max(0.0, target - end_frac)
+        penalty_end = 1500.0 * (deficit ** 2)
 
-    if best_i is None:
+        penalty_early_full = 0.0
+        if full_hour is not None and int(full_hour) < 15:
+            penalty_early_full = 2.5 * float(15 - int(full_hour))
+
+        return (3.0 * export) - (4.0 * spill) - penalty_end - penalty_early_full
+
+    base_score = score(base)
+    best = {"score": base_score, "off": "", "on": "", "L": 0}
+
+    for L in range(1, maxL + 1):
+        for s_idx in candidates:
+            e_idx = s_idx + L
+            if e_idx > len(pv):
+                continue
+            sim = _simulate_day(pv, hours, s_idx, L, cfg, soc_start_pct)
+            sc = score(sim)
+            if sc > best["score"]:
+                off_time = today.iloc[s_idx]["time"].to_pydatetime().strftime("%H:%M")
+                on_time = (today.iloc[e_idx - 1]["time"].to_pydatetime() + timedelta(hours=1)).strftime("%H:%M")
+                best = {"score": sc, "off": off_time, "on": on_time, "L": L}
+
+    if best["L"] == 0 or (best["score"] - base_score) < 1.0:
         return ("", "")
 
-    start_dt = search.iloc[best_i]["time"].to_pydatetime()
-    end_dt = search.iloc[best_i + L - 1]["time"].to_pydatetime() + timedelta(hours=1)
-
-    return (start_dt.strftime("%H:%M"), end_dt.strftime("%H:%M"))
+    return (str(best["off"]), str(best["on"]))
 
 
 # ---------------------------
@@ -487,13 +546,16 @@ def main() -> None:
     pr_cal = _load_pr_calendar(cfg.pr_calendar_path)
 
     run_day = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else date.today()
+    today = run_day
+    tomorrow = run_day + timedelta(days=1)
+
+    soc_pct = fetch_solax_soc_percent(cfg)
+    print(f"SoC (start, used): {soc_pct:.1f}% (fallback={cfg.soc_default_pct:.1f}%)")
+    print(f"Evening target SoC: {cfg.target_soc_evening * 100:.0f}% (usable)")
 
     raw = fetch_open_meteo_forecast(cfg)
     hourly = build_hourly_forecast(cfg, pr_cal, raw)
     daily = daily_kwh(hourly)
-
-    today = run_day
-    tomorrow = run_day + timedelta(days=1)
 
     day_rows = daily[daily["date"].isin([today, tomorrow])].copy()
     if day_rows.empty or len(day_rows) < 2:
@@ -505,12 +567,6 @@ def main() -> None:
     print("\nPredikce denní výroby (kWh):")
     print(day_rows.to_string(index=False))
 
-    pr_used_today = pr_for_date(pr_cal, cfg, today)
-    pr_used_tomorrow = pr_for_date(pr_cal, cfg, tomorrow)
-    pr_used_df = pd.DataFrame([{"date": today, "pr_used": pr_used_today}, {"date": tomorrow, "pr_used": pr_used_tomorrow}])
-    print("\nPoužité PR (median za den):")
-    print(pr_used_df.to_string(index=False))
-
     hourly_csv = save_hourly_csv(hourly, run_day)
     print(f"\nCSV uloženo: {hourly_csv.as_posix()}")
 
@@ -520,12 +576,13 @@ def main() -> None:
     summary_path = Path(args.out_summary)
     existing = _load_existing_summary(summary_path)
 
-    sw_off, sw_on = recommend_switch_window(
+    sw_off, sw_on = recommend_switch_window_smart(
         hourly_df=hourly,
         run_day=today,
         pred_today_kwh=today_kwh,
         cfg=cfg,
         summary_existing=existing,
+        soc_start_pct=soc_pct,
     )
 
     out_path = upsert_daily_forecast_summary(
@@ -538,6 +595,90 @@ def main() -> None:
         out_csv=args.out_summary,
     )
     print(f"Souhrn uložen/aktualizován: {out_path.as_posix()}")
+
+
+# --- helpers used above but defined after to keep sections readable ---
+
+def _round2(x: float) -> float:
+    try:
+        return float(round(float(x), 2))
+    except Exception:
+        return float("nan")
+
+
+def _parse_hhmm(s: Any) -> dtime | None:
+    if s is None:
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, "%H:%M").time()
+    except Exception:
+        return None
+
+
+def _hours_between_hhmm(off_s: Any, on_s: Any) -> float:
+    t1 = _parse_hhmm(off_s)
+    t2 = _parse_hhmm(on_s)
+    if not t1 or not t2:
+        return 0.0
+    dt1 = datetime.combine(date(2000, 1, 1), t1)
+    dt2 = datetime.combine(date(2000, 1, 1), t2)
+    if dt2 <= dt1:
+        return 0.0
+    return (dt2 - dt1).total_seconds() / 3600.0
+
+
+def upsert_daily_forecast_summary(
+    run_day: date,
+    pred_today: float,
+    pred_tomorrow: float,
+    actual_today: float | None = None,
+    switch_off: str = "",
+    switch_on: str = "",
+    out_csv: str = "forecasts/forecast_daily_summary.csv",
+) -> Path:
+    out_path = Path(out_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    required = ["Date", "PredictionToday", "ActualToday", "PredictionTomorrow", "SwitchOff", "SwitchOn"]
+
+    new_row = pd.DataFrame([{
+        "Date": run_day.isoformat(),
+        "PredictionToday": _round2(pred_today),
+        "ActualToday": (pd.NA if actual_today is None else _round2(actual_today)),
+        "PredictionTomorrow": _round2(pred_tomorrow),
+        "SwitchOff": (switch_off or ""),
+        "SwitchOn": (switch_on or ""),
+    }])
+
+    if out_path.exists():
+        old = pd.read_csv(out_path)
+        for c in required:
+            if c not in old.columns:
+                old[c] = pd.NA
+        old["Date"] = old["Date"].astype(str)
+        old = old[old["Date"] != run_day.isoformat()]
+        merged = pd.concat([old, new_row], ignore_index=True)
+    else:
+        merged = new_row
+
+    merged = merged[required].sort_values("Date")
+    merged.to_csv(out_path, index=False)
+    return out_path
+
+
+def _load_existing_summary(path: Path) -> pd.DataFrame | None:
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+        if "Date" in df.columns:
+            df["Date"] = df["Date"].astype(str)
+        return df
+    except Exception:
+        return None
 
 
 if __name__ == "__main__":
