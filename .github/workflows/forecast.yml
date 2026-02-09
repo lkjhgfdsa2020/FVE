@@ -37,6 +37,9 @@ jobs:
       - name: Run forecast
         env:
           TZ: Europe/Prague
+          SOLAX_BASE_URL: ${{ secrets.SOLAX_BASE_URL }}
+          SOLAX_TOKEN_ID: ${{ secrets.SOLAX_TOKEN_ID }}
+          SOLAX_WIFI_SN: ${{ secrets.SOLAX_WIFI_SN }}
         run: |
           echo "Local time (Prague): $(date)"
           FORCE="${{ github.event.inputs.force }}"
