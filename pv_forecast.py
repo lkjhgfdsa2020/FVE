@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, time as dtime
@@ -288,10 +289,11 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
 # ---------------------------
 
 def pv_kw_from_irr(cfg: Config, irr_wm2: float, pr: float) -> float:
-    """PV(kW) ~ pv_kwp * (irradiance / 1000) * PR"""
+    \"\"\"PV(kW) ~ pv_kwp * (irradiance / 1000) * PR\"\"\"
     try:
         x = float(irr_wm2)
-        if x <= 0:
+        # Robust against NaN/inf or missing values
+        if not math.isfinite(x) or x <= 0:
             return 0.0
         return float(cfg.pv_kwp) * (x / 1000.0) * float(pr)
     except Exception:
@@ -544,7 +546,11 @@ def build_intraday_30min(cfg: Config, pr_cal: Any | None, hourly_forecast: pd.Da
     # Index hourly inputs by time for interpolation
     src = day_df.set_index("time")
     numeric_cols = ["irr_wm2"]
+
+    # Ensure numeric dtype before time interpolation (Pandas 3.0 is stricter)
+    src["irr_wm2"] = pd.to_numeric(src["irr_wm2"], errors="coerce")
     if "cloud_cover" in src.columns:
+        src["cloud_cover"] = pd.to_numeric(src["cloud_cover"], errors="coerce")
         numeric_cols.append("cloud_cover")
 
     # Reindex to grid and interpolate
@@ -555,6 +561,7 @@ def build_intraday_30min(cfg: Config, pr_cal: Any | None, hourly_forecast: pd.Da
     out["date"] = out["time"].dt.date
 
     out["irr_wm2"] = pd.to_numeric(tmp["irr_wm2"], errors="coerce").fillna(0.0)
+    out["irr_wm2"] = out["irr_wm2"].fillna(0.0)
     if "cloud_cover" in tmp.columns:
         out["cloud_cover"] = pd.to_numeric(tmp["cloud_cover"], errors="coerce")
     else:
