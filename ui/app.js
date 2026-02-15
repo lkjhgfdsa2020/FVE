@@ -1,18 +1,22 @@
 /* ui/app.js
- * Dashboard for forecasts/forecast_daily_summary.csv
- * Columns: Date,PredictionToday,ActualToday,PredictionTomorrow,SwitchOff,SwitchOn
+ * Dashboard for:
+ *  - forecasts/forecast_daily_summary.csv
+ *  - forecasts/intraday/forecast_intraday_YYYY-MM-DD.csv (today)
  *
  * index.html IDs:
- * - canvas#chart
+ * - canvas#chart                (daily chart: PredictionToday + ActualToday)
+ * - canvas#chartIntraday        (intraday chart: pv_kw_pred today)
  * - tbody#tbody
  * - select#daysSelect
  * - button#reloadBtn
  * - input#searchInput
  * - input#descToggle
  * - span#meta
+ * - p#intradayStatus
  */
 
-let chartInstance = null;
+let dailyChart = null;
+let intradayChart = null;
 let allRows = [];
 
 const $ = (id) => document.getElementById(id);
@@ -30,15 +34,36 @@ function stripBOM(s) {
   return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
 }
 
-async function fetchCSV() {
-  const url = new URL("../forecasts/forecast_daily_summary.csv", window.location.href);
-  url.searchParams.set("_", String(Date.now())); // cache-bust
-  const r = await fetch(url.toString(), { cache: "no-store" });
-  if (!r.ok) throw new Error(`Failed to fetch CSV: HTTP ${r.status}`);
+function pragueTodayISO() {
+  // format YYYY-MM-DD in Europe/Prague
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Prague",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return fmt.format(new Date());
+}
+
+async function fetchText(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`Fetch failed: HTTP ${r.status} (${url})`);
   return await r.text();
 }
 
-function parseCSV(text) {
+async function fetchDailyCSV() {
+  const url = new URL("../forecasts/forecast_daily_summary.csv", window.location.href);
+  url.searchParams.set("_", String(Date.now())); // cache-bust
+  return await fetchText(url.toString());
+}
+
+async function fetchIntradayCSV(dayISO) {
+  const url = new URL(`../forecasts/intraday/forecast_intraday_${dayISO}.csv`, window.location.href);
+  url.searchParams.set("_", String(Date.now())); // cache-bust
+  return await fetchText(url.toString());
+}
+
+function parseDailyCSV(text) {
   const lines = text
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -56,8 +81,8 @@ function parseCSV(text) {
   const iPredTomorrow = idx("PredictionTomorrow");
 
   if (iDate === -1 || iPredToday === -1 || iPredTomorrow === -1) {
-    console.warn("CSV header:", header);
-    throw new Error("CSV missing required columns: Date, PredictionToday, PredictionTomorrow");
+    console.warn("Daily CSV header:", header);
+    throw new Error("Daily CSV missing required columns: Date, PredictionToday, PredictionTomorrow");
   }
 
   const rows = [];
@@ -75,6 +100,54 @@ function parseCSV(text) {
   }
 
   rows.sort((a, b) => a.Date.localeCompare(b.Date));
+  return rows;
+}
+
+function parseIntradayCSV(text) {
+  // expected columns: time,pv_kw_pred,step_kwh,irr_wm2,cloud_cover,pr_used,irr_source
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter((l) => l.trim().length > 0);
+
+  if (lines.length < 2) return [];
+
+  const header = lines[0].split(",").map((h) => stripBOM(h.trim()));
+  const idx = (name) => header.indexOf(name);
+
+  const iTime = idx("time");
+  const iPv = idx("pv_kw_pred");
+  const iIrr = idx("irr_wm2");
+  const iCloud = idx("cloud_cover");
+  const iPR = idx("pr_used");
+  const iSrc = idx("irr_source");
+
+  if (iTime === -1 || iPv === -1) {
+    console.warn("Intraday CSV header:", header);
+    throw new Error("Intraday CSV missing required columns: time, pv_kw_pred");
+  }
+
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    const t = (cols[iTime] ?? "").trim();
+    if (!t) continue;
+
+    // Expect "YYYY-MM-DD HH:MM:SS"
+    const hhmm = t.length >= 16 ? t.slice(11, 16) : t;
+
+    rows.push({
+      time: t,
+      hhmm,
+      pv_kw_pred: parseNumber(cols[iPv]) ?? 0,
+      irr_wm2: iIrr !== -1 ? parseNumber(cols[iIrr]) : null,
+      cloud_cover: iCloud !== -1 ? parseNumber(cols[iCloud]) : null,
+      pr_used: iPR !== -1 ? parseNumber(cols[iPR]) : null,
+      irr_source: iSrc !== -1 ? String(cols[iSrc] ?? "").trim() : "",
+    });
+  }
+
   return rows;
 }
 
@@ -105,44 +178,47 @@ function computeSuggestedMax(values) {
   return Math.ceil(head * 2) / 2; // 0.5 steps
 }
 
-function ensureFixedChartHeight() {
-  const canvas = $("chart");
+function ensureFixedChartHeight(canvasId, h = 420) {
+  const canvas = $(canvasId);
   if (!canvas) return;
   const wrap = canvas.parentElement;
   if (wrap) {
-    wrap.style.height = "420px";
-    wrap.style.minHeight = "420px";
-    wrap.style.maxHeight = "420px";
+    wrap.style.height = `${h}px`;
+    wrap.style.minHeight = `${h}px`;
+    wrap.style.maxHeight = `${h}px`;
   }
-  canvas.style.height = "420px";
+  canvas.style.height = `${h}px`;
 }
 
-function renderChart(rows) {
+function destroyChartIfAny(canvas, refObjKey) {
+  if (!canvas || typeof Chart === "undefined") return;
+  const existing = Chart.getChart(canvas);
+  if (existing) existing.destroy();
+}
+
+function renderDailyChart(rows) {
   const canvas = $("chart");
   if (!canvas) return;
 
-  ensureFixedChartHeight();
+  ensureFixedChartHeight("chart", 420);
 
   if (typeof Chart === "undefined") {
     throw new Error("Chart.js is not loaded (Chart is undefined).");
   }
 
-  // destroy any existing chart bound to this canvas (even from previous app.js versions)
-  const existing = Chart.getChart(canvas);
-  if (existing) existing.destroy();
-  if (chartInstance) {
-    try { chartInstance.destroy(); } catch (_) {}
-    chartInstance = null;
+  destroyChartIfAny(canvas);
+  if (dailyChart) {
+    try { dailyChart.destroy(); } catch (_) {}
+    dailyChart = null;
   }
 
   const labels = rows.map((r) => r.Date);
   const predToday = rows.map((r) => r.PredictionToday);
   const actualToday = rows.map((r) => r.ActualToday);
 
-  // IMPORTANT: PredictionTomorrow removed from chart
   const suggestedMax = computeSuggestedMax([...predToday, ...actualToday]);
 
-  chartInstance = new Chart(canvas.getContext("2d"), {
+  dailyChart = new Chart(canvas.getContext("2d"), {
     type: "line",
     data: {
       labels,
@@ -182,6 +258,59 @@ function renderChart(rows) {
   });
 }
 
+function renderIntradayChart(intraRows) {
+  const canvas = $("chartIntraday");
+  if (!canvas) return;
+
+  ensureFixedChartHeight("chartIntraday", 360);
+
+  if (typeof Chart === "undefined") {
+    throw new Error("Chart.js is not loaded (Chart is undefined).");
+  }
+
+  destroyChartIfAny(canvas);
+  if (intradayChart) {
+    try { intradayChart.destroy(); } catch (_) {}
+    intradayChart = null;
+  }
+
+  const labels = intraRows.map((r) => r.hhmm);
+  const pv = intraRows.map((r) => r.pv_kw_pred);
+
+  const suggestedMax = computeSuggestedMax([...pv]);
+
+  intradayChart = new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "PV kW pred (30 min)",
+          data: pv,
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.2,
+          spanGaps: true,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        y: { beginAtZero: true, suggestedMax, title: { display: true, text: "kW" } },
+        x: { ticks: { autoSkip: true, maxTicksLimit: 12, maxRotation: 0 } },
+      },
+      plugins: {
+        legend: { display: true },
+        tooltip: { intersect: false, mode: "index" },
+      },
+      interaction: { intersect: false, mode: "index" },
+    },
+  });
+}
+
 function renderTable(rows) {
   const tbody = $("tbody");
   if (!tbody) return;
@@ -205,7 +334,6 @@ function renderTable(rows) {
     tdA.textContent = r.ActualToday == null ? "" : r.ActualToday.toFixed(2);
     tr.appendChild(tdA);
 
-    // KEEP PredictionTomorrow in the table
     const tdP2 = document.createElement("td");
     tdP2.className = "num";
     tdP2.textContent = r.PredictionTomorrow == null ? "" : r.PredictionTomorrow.toFixed(2);
@@ -213,40 +341,53 @@ function renderTable(rows) {
 
     tbody.appendChild(tr);
   }
-
-  console.log("Rendered table rows:", tbody.children.length);
 }
 
 function updateMeta(rows) {
   const meta = $("meta");
   if (!meta) return;
-  if (!rows || rows.length === 0) {
-    meta.textContent = "";
-    return;
-  }
-  meta.textContent = ` (${rows.length} řádků)`;
+  meta.textContent = rows && rows.length ? ` (${rows.length} řádků)` : "";
 }
 
 function render() {
   const { tableRows, chartRows } = applyFilters(allRows);
 
-  // Render table even if chart fails
   renderTable(tableRows);
 
   try {
-    renderChart(chartRows);
+    renderDailyChart(chartRows);
   } catch (e) {
-    console.error("Chart render failed:", e);
+    console.error("Daily chart render failed:", e);
   }
 
   updateMeta(allRows);
 }
 
+async function loadIntradayToday() {
+  const status = $("intradayStatus");
+  const dayISO = pragueTodayISO();
+  try {
+    const txt = await fetchIntradayCSV(dayISO);
+    const rows = parseIntradayCSV(txt);
+    if (!rows.length) {
+      if (status) status.textContent = `Intraday forecast pro ${dayISO} je prázdný.`;
+      return;
+    }
+    if (status) status.textContent = `Zobrazuji intraday forecast pro ${dayISO} (${rows.length} bodů).`;
+    renderIntradayChart(rows);
+  } catch (e) {
+    console.warn("Intraday load failed:", e);
+    if (status) status.textContent = `Intraday forecast pro ${dayISO} není k dispozici (ještě neběžel forecast?).`;
+  }
+}
+
 async function reload() {
-  const csvText = await fetchCSV();
-  allRows = parseCSV(csvText);
-  console.log("Loaded rows:", allRows);
+  const csvText = await fetchDailyCSV();
+  allRows = parseDailyCSV(csvText);
+  console.log("Loaded daily rows:", allRows);
+
   render();
+  await loadIntradayToday();
 }
 
 function hookUI() {
