@@ -1,15 +1,16 @@
 name: forecast
 
 on:
-  schedule:
-    # GitHub cron is UTC. We run at 06:00 and 07:00 UTC to cover DST shifts for Europe/Prague.
-    - cron: "0 6,7 * * *"
   workflow_dispatch:
     inputs:
       force:
-        description: "Run even if not within 07:00–09:00 Europe/Prague window"
+        description: "Run even if not in 08:00±1h window"
         required: false
         default: "true"
+  schedule:
+    # GitHub cron is UTC. 07:00 UTC = 08:00 Europe/Prague in winter (CET).
+    # In summer (CEST), 06:00 UTC = 08:00 local. We allow ±1h window in the job.
+    - cron: "0 6,7 * * *"
 
 permissions:
   contents: write
@@ -17,12 +18,15 @@ permissions:
 jobs:
   forecast:
     runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Prague
+      SOLAX_BASE_URL: ${{ secrets.SOLAX_BASE_URL }}
+      SOLAX_TOKEN_ID: ${{ secrets.SOLAX_TOKEN_ID }}
+      SOLAX_WIFI_SN: ${{ secrets.SOLAX_WIFI_SN }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -31,37 +35,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run forecast (daily + intraday)
-        env:
-          TZ: Europe/Prague
-          FORCE: ${{ github.event.inputs.force || 'false' }}
-          SOLAX_BASE_URL: ${{ secrets.SOLAX_BASE_URL }}
-          SOLAX_TOKEN_ID: ${{ secrets.SOLAX_TOKEN_ID }}
-          SOLAX_WIFI_SN: ${{ secrets.SOLAX_WIFI_SN }}
+      - name: Run forecast (08:00 ± 1h)
+        shell: bash
         run: |
           echo "Local time (Prague): $(date)"
+          FORCE="${{ github.event.inputs.force }}"
           echo "Force mode: ${FORCE:-false}"
 
-          if [ "${FORCE}" != "true" ]; then
+          if [ "${FORCE:-false}" != "true" ]; then
             H=$(date +%H)
-            # Allow +/- 1 hour window around 08:00 => 07:00..09:59
+            # allow 07,08,09 (±1h around 08:00)
             if [ "$H" != "07" ] && [ "$H" != "08" ] && [ "$H" != "09" ]; then
-              echo "Not within 07:00–09:59 in Europe/Prague, skipping."
+              echo "Not within 08:00±1h in Europe/Prague, skipping."
               exit 0
             fi
           fi
 
           python -u pv_forecast.py
 
-      - name: Commit forecast outputs (summary + intraday)
+      - name: Commit outputs (daily summary + intraday)
+        shell: bash
         run: |
-          # Only commit the files we care about
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Stage summary + intraday (including deletions from cleanup)
-          git add -A forecasts/forecast_daily_summary.csv forecasts/intraday || true
+          git add forecasts/forecast_daily_summary.csv || true
+          git add forecasts/intraday || true
 
-          # If nothing changed, don't fail
+          git status --porcelain
+
           git commit -m "Update forecast outputs" || echo "No changes to commit"
-          git push || true
+          git push
