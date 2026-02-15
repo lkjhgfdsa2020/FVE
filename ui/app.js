@@ -1,10 +1,17 @@
 /* ui/app.js
- * Dashboard for forecasts/forecast_daily_summary.csv
- * Expected columns:
- * Date,PredictionToday,ActualToday,PredictionTomorrow,SwitchOff,SwitchOn
+ * Works with ui/index.html:
+ * - canvas id="chart"
+ * - tbody id="tbody"
+ * - select id="daysSelect"
+ * - button id="reloadBtn"
+ * - input id="searchInput"
+ * - checkbox id="descToggle"
+ *
+ * Data source: ../forecasts/forecast_daily_summary.csv (GitHub Pages: /FVE/ui/ -> /FVE/forecasts/)
  */
 
-let chart = null;
+let chartInstance = null;
+let allRows = [];
 
 const $ = (id) => document.getElementById(id);
 
@@ -12,8 +19,6 @@ function parseNumber(v) {
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   if (!s) return null;
-
-  // support comma decimal just in case
   const n = Number.parseFloat(s.replace(",", "."));
   return Number.isFinite(n) ? n : null;
 }
@@ -21,6 +26,14 @@ function parseNumber(v) {
 function stripBOM(s) {
   if (!s) return s;
   return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
+}
+
+async function fetchCSV() {
+  const url = new URL("../forecasts/forecast_daily_summary.csv", window.location.href);
+  url.searchParams.set("_", String(Date.now())); // cache bust
+  const r = await fetch(url.toString(), { cache: "no-store" });
+  if (!r.ok) throw new Error(`Failed to fetch CSV: HTTP ${r.status}`);
+  return await r.text();
 }
 
 function parseCSV(text) {
@@ -63,36 +76,40 @@ function parseCSV(text) {
   return rows;
 }
 
-async function fetchCSV() {
-  // For https://.../FVE/ui/ this resolves to https://.../FVE/forecasts/forecast_daily_summary.csv
-  const url = new URL("../forecasts/forecast_daily_summary.csv", window.location.href);
+function applyFilters(rows) {
+  const search = ($("searchInput")?.value || "").trim();
+  const desc = $("descToggle")?.checked ?? true;
 
-  // cache-bust (GitHub Pages can be aggressive)
-  url.searchParams.set("_", String(Date.now()));
+  let out = rows;
 
-  const r = await fetch(url.toString(), { cache: "no-store" });
-  if (!r.ok) throw new Error(`Failed to fetch CSV: HTTP ${r.status}`);
-  return await r.text();
-}
+  if (search) {
+    out = out.filter((r) => r.Date.includes(search));
+  }
 
-function sliceLast(rows, n) {
-  if (!Number.isFinite(n) || n <= 0) return rows;
-  return rows.length <= n ? rows : rows.slice(rows.length - n);
+  out = out.slice().sort((a, b) => (desc ? b.Date.localeCompare(a.Date) : a.Date.localeCompare(b.Date)));
+
+  const nDays = $("daysSelect") ? Number.parseInt($("daysSelect").value, 10) : 30;
+  if (Number.isFinite(nDays) && nDays > 0 && out.length > nDays) {
+    out = out.slice(0, nDays);
+  }
+
+  // Chart wants chronological order (left->right)
+  const chartRows = out.slice().sort((a, b) => a.Date.localeCompare(b.Date));
+
+  return { tableRows: out, chartRows };
 }
 
 function computeSuggestedMax(values) {
   const nums = values.filter((v) => Number.isFinite(v));
   if (nums.length === 0) return 5;
   const m = Math.max(...nums);
-  // add headroom and round nicely
   const head = m * 1.15 + 0.5;
-  return Math.ceil(head * 2) / 2; // 0.5 kWh steps
+  return Math.ceil(head * 2) / 2; // 0.5 steps
 }
 
 function ensureFixedChartHeight() {
-  const canvas = $("forecastChart");
+  const canvas = $("chart");
   if (!canvas) return;
-
   const wrap = canvas.parentElement;
   if (wrap) {
     wrap.style.height = "420px";
@@ -103,7 +120,7 @@ function ensureFixedChartHeight() {
 }
 
 function renderChart(rows) {
-  const canvas = $("forecastChart");
+  const canvas = $("chart");
   if (!canvas) return;
 
   ensureFixedChartHeight();
@@ -120,7 +137,7 @@ function renderChart(rows) {
     datasets: [
       {
         label: "PredictionToday (kWh)",
-        data: predToday, // array of numbers/nulls
+        data: predToday,
         borderWidth: 2,
         pointRadius: 3,
         tension: 0.25,
@@ -147,19 +164,12 @@ function renderChart(rows) {
 
   const options = {
     responsive: true,
-    maintainAspectRatio: false, // IMPORTANT (fixed height)
+    maintainAspectRatio: false,
     animation: false,
     scales: {
-      y: {
-        beginAtZero: true,
-        suggestedMax,
-      },
+      y: { beginAtZero: true, suggestedMax },
       x: {
-        ticks: {
-          autoSkip: true,
-          maxTicksLimit: 12,
-          maxRotation: 0,
-        },
+        ticks: { autoSkip: true, maxTicksLimit: 12, maxRotation: 0 },
       },
     },
     plugins: {
@@ -169,16 +179,16 @@ function renderChart(rows) {
     interaction: { intersect: false, mode: "index" },
   };
 
-  if (chart) {
-    chart.data = data;
-    chart.options = options;
-    chart.update();
+  if (typeof Chart === "undefined") {
+    throw new Error("Chart.js is not loaded (Chart is undefined). Check index.html script order.");
+  }
+
+  if (chartInstance) {
+    chartInstance.data = data;
+    chartInstance.options = options;
+    chartInstance.update();
   } else {
-    // Ensure Chart.js is available
-    if (typeof Chart === "undefined") {
-      throw new Error("Chart.js is not loaded (Chart is undefined). Check index.html script order.");
-    }
-    chart = new Chart(canvas.getContext("2d"), {
+    chartInstance = new Chart(canvas.getContext("2d"), {
       type: "line",
       data,
       options,
@@ -187,7 +197,7 @@ function renderChart(rows) {
 }
 
 function renderTable(rows) {
-  const tbody = $("forecastTableBody");
+  const tbody = $("tbody");
   if (!tbody) return;
 
   tbody.innerHTML = "";
@@ -199,14 +209,17 @@ function renderTable(rows) {
     tr.appendChild(tdDate);
 
     const tdP1 = document.createElement("td");
+    tdP1.className = "num";
     tdP1.textContent = r.PredictionToday == null ? "" : r.PredictionToday.toFixed(2);
     tr.appendChild(tdP1);
 
     const tdA = document.createElement("td");
+    tdA.className = "num";
     tdA.textContent = r.ActualToday == null ? "" : r.ActualToday.toFixed(2);
     tr.appendChild(tdA);
 
     const tdP2 = document.createElement("td");
+    tdP2.className = "num";
     tdP2.textContent = r.PredictionTomorrow == null ? "" : r.PredictionTomorrow.toFixed(2);
     tr.appendChild(tdP2);
 
@@ -214,27 +227,47 @@ function renderTable(rows) {
   }
 }
 
-async function loadAndRender() {
-  const nDays = $("daysSelect") ? Number.parseInt($("daysSelect").value, 10) : 30;
+function updateMeta(rows) {
+  const meta = $("meta");
+  if (!meta) return;
+  if (!rows || rows.length === 0) {
+    meta.textContent = "";
+    return;
+  }
+  const minD = rows[0].Date;
+  const maxD = rows[rows.length - 1].Date;
+  meta.textContent = ` (${rows.length} řádků, ${minD} → ${maxD})`;
+}
 
+function render() {
+  const { tableRows, chartRows } = applyFilters(allRows);
+  renderChart(chartRows);
+  renderTable(tableRows);
+  updateMeta(allRows);
+}
+
+async function reload() {
   const csvText = await fetchCSV();
-  const allRows = parseCSV(csvText);
-  const rows = sliceLast(allRows, nDays);
+  allRows = parseCSV(csvText);
 
-  // Debug – if it still draws empty, this will tell us what numbers came in:
-  console.log("forecast rows:", rows);
+  // Debug: confirm numbers are parsed
+  console.log("Loaded rows (first 5):", allRows.slice(0, 5));
 
-  renderChart(rows);
-  renderTable(rows);
+  render();
+}
+
+function hookUI() {
+  $("reloadBtn")?.addEventListener("click", () => reload().catch(console.error));
+  $("daysSelect")?.addEventListener("change", () => render());
+  $("descToggle")?.addEventListener("change", () => render());
+  $("searchInput")?.addEventListener("input", () => render());
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  if ($("daysSelect")) {
-    $("daysSelect").addEventListener("change", () => loadAndRender().catch(console.error));
-  }
-  loadAndRender().catch((e) => {
+  hookUI();
+  reload().catch((e) => {
     console.error(e);
-    const box = $("errorBox");
-    if (box) box.textContent = `Error: ${e.message}`;
+    const meta = $("meta");
+    if (meta) meta.textContent = ` (chyba: ${e.message})`;
   });
 });
