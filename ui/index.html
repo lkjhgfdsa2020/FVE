@@ -3,92 +3,83 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>PV Forecast Dashboard</title>
-  <link rel="stylesheet" href="./styles.css" />
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <title>FVE Forecast Dashboard</title>
+
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 20px; }
+    h1 { margin: 0 0 10px 0; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 10px 0 16px 0; }
+    .card { border: 1px solid rgba(128,128,128,.35); border-radius: 12px; padding: 12px; }
+    .chart-wrap { position: relative; width: 100%; }
+    canvas { width: 100% !important; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid rgba(128,128,128,.25); }
+    th { text-align: left; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { opacity: .8; font-size: 0.95em; }
+    .small { font-size: 0.9em; }
+    input[type="text"] { padding: 6px 8px; border-radius: 8px; border: 1px solid rgba(128,128,128,.35); }
+    select, button { padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(128,128,128,.35); }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-
 <body>
-  <header class="header">
-    <div>
-      <h1>PV Forecast Dashboard</h1>
-      <p class="sub">
-        Zdroj: <code>forecasts/forecast_daily_summary.csv</code>
-        <span id="meta" class="meta"></span>
-      </p>
+  <h1>Forecast Dashboard <span id="meta" class="muted"></span></h1>
+
+  <div class="row">
+    <button id="reloadBtn">Reload</button>
+
+    <label class="small">Days:
+      <select id="daysSelect">
+        <option value="7">7</option>
+        <option value="14">14</option>
+        <option value="30" selected>30</option>
+        <option value="60">60</option>
+        <option value="120">120</option>
+      </select>
+    </label>
+
+    <label class="small">Search date:
+      <input id="searchInput" type="text" placeholder="YYYY-MM" />
+    </label>
+
+    <label class="small">
+      <input id="descToggle" type="checkbox" checked />
+      Desc
+    </label>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 8px 0;">Daily (kWh) – PredictionToday + ActualToday</h2>
+    <div class="chart-wrap">
+      <canvas id="chartDaily"></canvas>
     </div>
-    <div class="actions">
-      <button id="reloadBtn">Reload</button>
+  </div>
+
+  <div class="card" style="margin-top:12px;">
+    <h2 style="margin:0 0 6px 0;">Intraday (today) – hourly PV prediction (kW)</h2>
+    <div id="intradayMsg" class="muted" style="margin-bottom:6px;"></div>
+    <div class="chart-wrap">
+      <canvas id="chartIntraday"></canvas>
     </div>
-  </header>
+  </div>
 
-  <main class="grid">
-    <section class="card">
-      <div class="card-head">
-        <h2>Graf</h2>
-        <div class="controls">
-          <label>
-            Zobrazit dní:
-            <select id="daysSelect">
-              <option value="14">14</option>
-              <option value="30" selected>30</option>
-              <option value="60">60</option>
-              <option value="120">120</option>
-              <option value="0">Vše</option>
-            </select>
-          </label>
-        </div>
-      </div>
-      <div class="chart-wrap">
-  <canvas id="chart"></canvas>
-</div>
-    </section>
-
-    <section class="card">
-      <div class="card-head">
-        <h2>Intraday forecast (dnes)</h2>
-        <div class="controls">
-          <span class="sub">Zdroj: <code>forecasts/intraday/forecast_intraday_YYYY-MM-DD.csv</code></span>
-        </div>
-      </div>
-      <div class="chart-wrap">
-        <canvas id="chartIntraday"></canvas>
-      </div>
-      <p id="intradayStatus" class="sub" style="margin-top:10px;"></p>
-    </section>
-
-    <section class="card">
-      <div class="card-head">
-        <h2>Tabulka</h2>
-        <div class="controls">
-          <input id="searchInput" type="search" placeholder="Hledej datum (YYYY-MM-DD)..." />
-          <label class="checkbox">
-            <input id="descToggle" type="checkbox" checked />
-            Nejnovější nahoře
-          </label>
-        </div>
-      </div>
-
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th class="num">PredictionToday (kWh)</th>
-              <th class="num">ActualToday (kWh)</th>
-              <th class="num">PredictionTomorrow (kWh)</th>
-            </tr>
-          </thead>
-          <tbody id="tbody"></tbody>
-        </table>
-      </div>
-    </section>
-  </main>
-
-  <footer class="footer">
-    <span>Tip: stránka se dá hostovat přes GitHub Pages.</span>
-  </footer>
+  <div class="card" style="margin-top:12px;">
+    <h2 style="margin:0 0 8px 0;">Forecast Daily Summary</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>PredictionToday</th>
+          <th>ActualToday</th>
+          <th>PredictionTomorrow</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
 
   <script src="./app.js"></script>
 </body>
