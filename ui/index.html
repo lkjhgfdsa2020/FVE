@@ -47,6 +47,19 @@
 
     <section class="card">
       <div class="card-head">
+        <h2>Intraday forecast (dnes)</h2>
+        <div class="controls">
+          <span class="sub">Zdroj: <code>forecasts/intraday/forecast_intraday_YYYY-MM-DD.csv</code></span>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="chartIntraday"></canvas>
+      </div>
+      <p id="intradayStatus" class="sub" style="margin-top:10px;"></p>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
         <h2>Tabulka</h2>
         <div class="controls">
           <input id="searchInput" type="search" placeholder="Hledej datum (YYYY-MM-DD)..." />
