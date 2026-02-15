@@ -1,18 +1,15 @@
-name: Daily PV forecast
+name: forecast
 
 on:
   schedule:
-    # GitHub Actions cron runs in UTC.
-    # Europe/Prague 08:00 = 07:00 UTC (winter) or 06:00 UTC (summer)
-    # We run twice and gate inside the job so it only executes at 08:00 Prague.
-    - cron: "0 6 * * *"
-    - cron: "0 7 * * *"
+    # GitHub cron is UTC. We run at 06:00 and 07:00 UTC to cover DST shifts for Europe/Prague.
+    - cron: "0 6,7 * * *"
   workflow_dispatch:
     inputs:
       force:
-        description: "Run even if not 08:00 Europe/Prague"
+        description: "Run even if not within 07:00–09:00 Europe/Prague window"
         required: false
-        default: "false"
+        default: "true"
 
 permissions:
   contents: write
@@ -24,79 +21,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run forecast
+      - name: Run forecast (daily + intraday)
         env:
           TZ: Europe/Prague
+          FORCE: ${{ github.event.inputs.force || 'false' }}
           SOLAX_BASE_URL: ${{ secrets.SOLAX_BASE_URL }}
           SOLAX_TOKEN_ID: ${{ secrets.SOLAX_TOKEN_ID }}
           SOLAX_WIFI_SN: ${{ secrets.SOLAX_WIFI_SN }}
         run: |
           echo "Local time (Prague): $(date)"
-          FORCE="${{ github.event.inputs.force }}"
           echo "Force mode: ${FORCE:-false}"
 
-          if [ "$FORCE" != "true" ]; then
+          if [ "${FORCE}" != "true" ]; then
             H=$(date +%H)
-
-            # allow 07:00–09:59 Prague (± ~1h around 08:00)
-            if [ "$H" -lt "07" ] || [ "$H" -gt "09" ]; then
-              echo "Not within 07:00–09:59 Europe/Prague, skipping."
+            # Allow +/- 1 hour window around 08:00 => 07:00..09:59
+            if [ "$H" != "07" ] && [ "$H" != "08" ] && [ "$H" != "09" ]; then
+              echo "Not within 07:00–09:59 in Europe/Prague, skipping."
               exit 0
             fi
           fi
 
           python -u pv_forecast.py
 
-      - name: Debug - show generated files
+      - name: Commit forecast outputs (summary + intraday)
         run: |
-          echo "=== PWD ==="
-          pwd
-          echo "=== ls -la ==="
-          ls -la
+          # Only commit the files we care about
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          echo "=== ls forecasts ==="
-          ls -la forecasts || true
-          echo "=== ls forecast_outputs ==="
-          ls -la forecast_outputs || true
+          # Stage summary + intraday (including deletions from cleanup)
+          git add -A forecasts/forecast_daily_summary.csv forecasts/intraday || true
 
-          echo "=== find forecast_daily_summary.csv ==="
-          find . -maxdepth 5 -name "forecast_daily_summary.csv" -print || true
-
-          echo "=== tail forecasts/forecast_daily_summary.csv ==="
-          tail -n 40 forecasts/forecast_daily_summary.csv || true
-
-          echo "=== tail forecast_outputs/forecast_daily_summary.csv ==="
-          tail -n 40 forecast_outputs/forecast_daily_summary.csv || true
-
-          echo "=== git status (porcelain) ==="
-          git status --porcelain || true
-
-      - name: Debug - git diff
-        run: |
-          echo "=== git diff (forecasts/forecast_daily_summary.csv) ==="
-          git diff -- forecasts/forecast_daily_summary.csv || true
-          echo "=== git diff (forecast_outputs/forecast_daily_summary.csv) ==="
-          git diff -- forecast_outputs/forecast_daily_summary.csv || true
-
-      - name: Commit forecast summary
-        run: |
-          if [ -f forecasts/forecast_daily_summary.csv ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add forecasts/forecast_daily_summary.csv
-            git commit -m "Update daily forecast summary" || echo "No changes to commit"
-            git push
-          else
-            echo "No summary file found at forecasts/forecast_daily_summary.csv"
-            echo "If it was created elsewhere, fix pv_forecast.py to write to forecasts/forecast_daily_summary.csv"
-          fi
+          # If nothing changed, don't fail
+          git commit -m "Update forecast outputs" || echo "No changes to commit"
+          git push || true
