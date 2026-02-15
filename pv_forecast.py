@@ -2,36 +2,38 @@
 # pv_forecast.py
 #
 # Daily PV forecast (today + tomorrow) using Open-Meteo hourly irradiance (GTI preferred, SWR fallback),
-# PR model (from pr_calendar.json or config.json), and writes:
+# PR model (from pr_calendar.json or config.json).
 #
+# Writes:
 # - forecast_outputs/pv_hourly_forecast_YYYY-MM-DD.csv
 # - forecast_plots/pv_forecast_YYYY-MM-DD.png
 # - forecasts/forecast_daily_summary.csv  (upsert by Date)
+# - forecasts/intraday/forecast_intraday_YYYY-MM-DD.csv (HOURLY intraday for today)
 #
 # Summary CSV columns:
 # Date,PredictionToday,ActualToday,PredictionTomorrow,SwitchOff,SwitchOn
 #
 # Switch window recommendation (SMART):
-# - Models your controller behavior in Backup mode:
+# - Models controller behavior in Backup mode:
 #   ON  (controller connected): House -> Charge battery -> Export ONLY when battery is 100%
 #   OFF (controller disconnected): House -> Export (up to limit) -> Charge battery from remaining
 #
-# - Chooses the best OFF window by hourly simulation & scoring:
-#   maximize export, minimize spill/curtailment, keep evening SoC target (default 90%),
+# - Chooses best OFF window by hourly simulation & scoring:
+#   maximize export, minimize spill/curtailment, keep evening SoC target (cfg.target_soc_evening, default 0.85 usable),
 #   and obey monthly OFF budget (plant ON >= 80% of month).
 #
-# - SoC is fetched from SolaXCloud API (realtimeInfo/get) if env vars exist:
+# SoC is fetched from SolaXCloud API (realtimeInfo/get) if env vars exist:
 #   SOLAX_BASE_URL, SOLAX_TOKEN_ID, SOLAX_WIFI_SN
-#   If SoC is null/unavailable -> default 20%.
+# If SoC is null/unavailable -> default 20%.
 #
-# SwitchOff/SwitchOn are empty strings if we recommend not switching off at all.
+# SwitchOff/SwitchOn are empty strings if we recommend not switching off.
 
 from __future__ import annotations
 
 import argparse
 import calendar
 import json
-import math
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, time as dtime
@@ -51,6 +53,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 # ---------------------------
 # Config
 # ---------------------------
+
 
 @dataclass
 class Config:
@@ -72,8 +75,8 @@ class Config:
     # Battery model
     battery_kwh_total: float = 11.6
     battery_usable_frac: float = 0.90  # usable = total * frac
-    target_soc_evening: float = 0.85   # target at end of day (usable fraction)
-    soc_default_pct: float = 20.0      # used if API returns null/unavailable
+    target_soc_evening: float = 0.85  # target at end of day (usable fraction)
+    soc_default_pct: float = 20.0  # used if API returns null/unavailable
 
     # Switch window constraints
     max_off_hours: float = 10.0
@@ -120,6 +123,7 @@ def load_config(path: str = "config.json") -> Config:
 # ---------------------------
 # PR calendar loading
 # ---------------------------
+
 
 def _load_pr_calendar(path: str) -> Any | None:
     p = Path(path)
@@ -187,12 +191,9 @@ def pr_for_date(pr_cal: Any | None, cfg: Config, day: date) -> float:
 # SolaXCloud SoC
 # ---------------------------
 
+
 def fetch_solax_soc_percent(cfg: Config) -> float:
-    """
-    Fetch SoC (%) from SolaXCloud realtimeInfo/get (env vars).
-    If missing / null / error => fallback cfg.soc_default_pct.
-    """
-    import os
+    """Fetch SoC (%) from SolaXCloud realtimeInfo/get (env vars)."""
 
     base_url = os.getenv("SOLAX_BASE_URL", "").strip()
     token_id = os.getenv("SOLAX_TOKEN_ID", "").strip()
@@ -232,11 +233,10 @@ def fetch_solax_soc_percent(cfg: Config) -> float:
 # Open-Meteo
 # ---------------------------
 
+
 def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
-    """
-    Fetch hourly forecast. Prefer hourly "global_tilted_irradiance" if available,
-    else fallback to "shortwave_radiation".
-    """
+    """Fetch hourly forecast."""
+
     url = "https://api.open-meteo.com/v1/forecast"
 
     hourly_vars = [
@@ -274,7 +274,9 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
         df["irr_wm2"] = pd.to_numeric(swr, errors="coerce")
         df["irr_source"] = "shortwave_radiation"
     else:
-        raise RuntimeError("Open-Meteo did not return global_tilted_irradiance nor shortwave_radiation.")
+        raise RuntimeError(
+            "Open-Meteo did not return global_tilted_irradiance nor shortwave_radiation."
+        )
 
     if "cloud_cover" in j["hourly"]:
         df["cloud_cover"] = pd.to_numeric(j["hourly"]["cloud_cover"], errors="coerce")
@@ -288,12 +290,13 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
 # PV power model (simple)
 # ---------------------------
 
+
 def pv_kw_from_irr(cfg: Config, irr_wm2: float, pr: float) -> float:
     """PV(kW) ~ pv_kwp * (irradiance / 1000) * PR"""
+
     try:
         x = float(irr_wm2)
-        # Robust against NaN/inf or missing values
-        if not math.isfinite(x) or x <= 0:
+        if not (x > 0.0):
             return 0.0
         return float(cfg.pv_kwp) * (x / 1000.0) * float(pr)
     except Exception:
@@ -304,9 +307,34 @@ def pv_kw_from_irr(cfg: Config, irr_wm2: float, pr: float) -> float:
 # Switch window recommendation (SMART simulation)
 # ---------------------------
 
+
 def _month_off_budget_hours(year: int, month: int) -> float:
     days_in_month = calendar.monthrange(year, month)[1]
     return 0.20 * days_in_month * 24.0  # OFF <= 20% => ON >= 80%
+
+
+def _parse_hhmm(s: Any) -> dtime | None:
+    if s is None:
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, "%H:%M").time()
+    except Exception:
+        return None
+
+
+def _hours_between_hhmm(off_s: Any, on_s: Any) -> float:
+    t1 = _parse_hhmm(off_s)
+    t2 = _parse_hhmm(on_s)
+    if not t1 or not t2:
+        return 0.0
+    dt1 = datetime.combine(date(2000, 1, 1), t1)
+    dt2 = datetime.combine(date(2000, 1, 1), t2)
+    if dt2 <= dt1:
+        return 0.0
+    return (dt2 - dt1).total_seconds() / 3600.0
 
 
 def _compute_used_off_hours(summary_existing: pd.DataFrame | None, month_key: str) -> float:
@@ -462,7 +490,7 @@ def recommend_switch_window_smart(
 
         target = float(cfg.target_soc_evening)
         deficit = max(0.0, target - end_frac)
-        penalty_end = 1500.0 * (deficit ** 2)
+        penalty_end = 1500.0 * (deficit**2)
 
         penalty_early_full = 0.0
         if full_hour is not None and int(full_hour) < 15:
@@ -495,6 +523,7 @@ def recommend_switch_window_smart(
 # Forecast pipeline
 # ---------------------------
 
+
 def build_hourly_forecast(cfg: Config, pr_cal: Any | None, forecast_df: pd.DataFrame) -> pd.DataFrame:
     df = forecast_df.copy()
     df["pr_used"] = df["date"].apply(lambda d: pr_for_date(pr_cal, cfg, d))
@@ -520,153 +549,6 @@ def save_hourly_csv(df_hourly: pd.DataFrame, run_day: date) -> Path:
     export.to_csv(out_path, index=False)
     return out_path
 
-def build_intraday_30min(cfg: Config, pr_cal: Any | None, hourly_forecast: pd.DataFrame, run_day: date) -> pd.DataFrame:
-    """
-    Build 30-minute intraday forecast for a specific day.
-
-    Strategy (robust across Pandas versions & tz handling):
-      - Slice today's hourly rows.
-      - Force timestamps to timezone-naive local time (drop tzinfo if present).
-      - Create a 30-min grid 00:00..23:30.
-      - Interpolate numeric series using time interpolation on a unified DatetimeIndex.
-      - Prefer interpolating pv_kw_pred directly (it must exist if daily kWh is non-zero),
-        and additionally interpolate irr_wm2 / cloud_cover when available.
-      - step_kwh = pv_kw_pred * 0.5 (kWh per 30-min step)
-    """
-    cols = ["time", "pv_kw_pred", "step_kwh", "irr_wm2", "cloud_cover", "pr_used", "irr_source"]
-    day_df = hourly_forecast[hourly_forecast["date"] == run_day].copy()
-    if day_df.empty:
-        return pd.DataFrame(columns=cols)
-
-    # Ensure datetime and drop tz-info (avoid tz-aware vs tz-naive union issues)
-    day_df["time"] = pd.to_datetime(day_df["time"], errors="coerce")
-    try:
-        if getattr(day_df["time"].dt, "tz", None) is not None:
-            # Convert to local tz (cfg.timezone) if possible, then drop tz
-            day_df["time"] = day_df["time"].dt.tz_convert(cfg.timezone).dt.tz_localize(None)
-        else:
-            # If tz-naive already, keep as-is
-            pass
-    except Exception:
-        # Fallback: just drop tz if it's there
-        try:
-            day_df["time"] = day_df["time"].dt.tz_localize(None)
-        except Exception:
-            pass
-
-    day_df = day_df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
-
-    start = pd.Timestamp(datetime.combine(run_day, dtime(0, 0)))
-    end = pd.Timestamp(datetime.combine(run_day, dtime(23, 30)))
-    grid = pd.date_range(start=start, end=end, freq="30min")
-
-    src = day_df.set_index("time")
-
-    # Prepare series to interpolate (force numeric)
-    want = []
-    for c in ["pv_kw_pred", "irr_wm2", "cloud_cover"]:
-        if c in src.columns:
-            src[c] = pd.to_numeric(src[c], errors="coerce")
-            want.append(c)
-
-    # If pv_kw_pred is missing (shouldn't happen), compute it from irr_wm2 if possible
-    if "pv_kw_pred" not in want:
-        if "irr_wm2" in src.columns:
-            pr = pr_for_date(pr_cal, cfg, run_day)
-            src["pv_kw_pred"] = [pv_kw_from_irr(cfg, irr, pr) for irr in src["irr_wm2"].tolist()]
-            want.append("pv_kw_pred")
-        else:
-            # Nothing to do
-            out = pd.DataFrame({"time": grid})
-            out["pv_kw_pred"] = 0.0
-            out["step_kwh"] = 0.0
-            out["irr_wm2"] = 0.0
-            out["cloud_cover"] = pd.NA
-            out["pr_used"] = float(pr_for_date(pr_cal, cfg, run_day))
-            out["irr_source"] = "unknown"
-            return out[cols]
-
-    # Time interpolation on unified index
-    idx = src.index.union(grid)
-    tmp = src[want].reindex(idx).sort_index()
-    tmp = tmp.interpolate(method="time")
-    tmp = tmp.reindex(grid)
-
-    out = pd.DataFrame({"time": grid})
-    pr = float(pr_for_date(pr_cal, cfg, run_day))
-    out["pr_used"] = pr
-
-    # irr_source constant
-    if "irr_source" in day_df.columns and len(day_df["irr_source"].dropna()) > 0:
-        out["irr_source"] = str(day_df["irr_source"].dropna().iloc[0])
-    else:
-        out["irr_source"] = "unknown"
-
-    # pv_kw_pred (prefer interpolated pv)
-    out["pv_kw_pred"] = pd.to_numeric(tmp.get("pv_kw_pred", pd.Series(index=grid, data=0.0)), errors="coerce").fillna(0.0)
-    out.loc[out["pv_kw_pred"] < 0, "pv_kw_pred"] = 0.0
-
-    # irr_wm2 (if missing, approximate from pv_kw_pred)
-    if "irr_wm2" in tmp.columns:
-        out["irr_wm2"] = pd.to_numeric(tmp["irr_wm2"], errors="coerce").fillna(0.0)
-        out.loc[out["irr_wm2"] < 0, "irr_wm2"] = 0.0
-    else:
-        # Invert PV model: pv = pv_kwp * (irr/1000) * pr  => irr = pv/(pv_kwp*pr)*1000
-        denom = max(1e-9, float(cfg.pv_kwp) * pr)
-        out["irr_wm2"] = (out["pv_kw_pred"] / denom) * 1000.0
-
-    if "cloud_cover" in tmp.columns:
-        out["cloud_cover"] = pd.to_numeric(tmp["cloud_cover"], errors="coerce")
-    else:
-        out["cloud_cover"] = pd.NA
-
-    out["step_kwh"] = out["pv_kw_pred"] * 0.5
-    return out[cols]
-
-
-def save_intraday_csv(df_intraday: pd.DataFrame, run_day: date) -> Path:
-    out_dir = Path("forecasts") / "intraday"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"forecast_intraday_{run_day.isoformat()}.csv"
-
-    export = df_intraday.copy()
-    export["time"] = export["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    cols = ["time", "pv_kw_pred", "step_kwh", "irr_wm2", "cloud_cover", "pr_used", "irr_source"]
-    # Keep only existing columns in desired order
-    cols = [c for c in cols if c in export.columns]
-    export = export[cols]
-    export.to_csv(out_path, index=False)
-    return out_path
-
-
-def cleanup_intraday_files(keep_days: int = 30) -> int:
-    """
-    Delete intraday forecast CSVs older than keep_days (based on filename date).
-    Returns count of deleted files.
-    """
-    intraday_dir = Path("forecasts") / "intraday"
-    if not intraday_dir.exists():
-        return 0
-
-    today = date.today()
-    deleted = 0
-
-    for p in intraday_dir.glob("forecast_intraday_*.csv"):
-        m = re.search(r"forecast_intraday_(\d{4}-\d{2}-\d{2})\.csv$", p.name)
-        if not m:
-            continue
-        try:
-            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
-        except Exception:
-            continue
-        if (today - d).days > int(keep_days):
-            try:
-                p.unlink()
-                deleted += 1
-            except Exception:
-                pass
-    return deleted
-
 
 def save_plot(df_hourly: pd.DataFrame, run_day: date) -> Path:
     out_dir = Path("forecast_plots")
@@ -683,6 +565,130 @@ def save_plot(df_hourly: pd.DataFrame, run_day: date) -> Path:
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
+    return out_path
+
+
+def save_intraday_hourly(df_hourly: pd.DataFrame, run_day: date) -> Path:
+    """Save intraday HOURLY series for run_day (no interpolation)."""
+
+    out_dir = Path("forecasts") / "intraday"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"forecast_intraday_{run_day.isoformat()}.csv"
+
+    day = df_hourly[df_hourly["date"] == run_day].copy()
+    if day.empty:
+        pd.DataFrame(
+            columns=["time", "pv_kw_pred", "step_kwh", "irr_wm2", "cloud_cover", "pr_used", "irr_source"]
+        ).to_csv(out_path, index=False)
+        return out_path
+
+    day = day.sort_values("time")
+
+    pv = pd.to_numeric(day["pv_kw_pred"], errors="coerce").fillna(0.0)
+    out = pd.DataFrame(
+        {
+            "time": day["time"].dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "pv_kw_pred": pv.round(4),
+            "step_kwh": (pv * 1.0).round(4),  # 1h step
+            "irr_wm2": pd.to_numeric(day.get("irr_wm2", 0.0), errors="coerce").fillna(0.0).round(2),
+            "cloud_cover": pd.to_numeric(day.get("cloud_cover", pd.NA), errors="coerce"),
+            "pr_used": pd.to_numeric(day.get("pr_used", 0.0), errors="coerce").fillna(float("nan")).round(4),
+            "irr_source": day.get("irr_source", pd.Series([""] * len(day))).astype(str),
+        }
+    )
+
+    out.to_csv(out_path, index=False)
+    return out_path
+
+
+def cleanup_intraday_files(keep_days: int = 30) -> int:
+    """Delete forecasts/intraday/forecast_intraday_YYYY-MM-DD.csv older than keep_days."""
+
+    base = Path("forecasts") / "intraday"
+    if not base.exists():
+        return 0
+
+    today = date.today()
+    deleted = 0
+    for p in base.glob("forecast_intraday_*.csv"):
+        m = re.search(r"forecast_intraday_(\d{4}-\d{2}-\d{2})\.csv$", p.name)
+        if not m:
+            continue
+        try:
+            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if (today - d).days > int(keep_days):
+            try:
+                p.unlink()
+                deleted += 1
+            except Exception:
+                pass
+    return deleted
+
+
+# --- summary helpers ---
+
+
+def _round2(x: float) -> float:
+    try:
+        return float(round(float(x), 2))
+    except Exception:
+        return float("nan")
+
+
+def _load_existing_summary(path: Path) -> pd.DataFrame | None:
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+        if "Date" in df.columns:
+            df["Date"] = df["Date"].astype(str)
+        return df
+    except Exception:
+        return None
+
+
+def upsert_daily_forecast_summary(
+    run_day: date,
+    pred_today: float,
+    pred_tomorrow: float,
+    actual_today: float | None = None,
+    switch_off: str = "",
+    switch_on: str = "",
+    out_csv: str = "forecasts/forecast_daily_summary.csv",
+) -> Path:
+    out_path = Path(out_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    required = ["Date", "PredictionToday", "ActualToday", "PredictionTomorrow", "SwitchOff", "SwitchOn"]
+
+    new_row = pd.DataFrame(
+        [
+            {
+                "Date": run_day.isoformat(),
+                "PredictionToday": _round2(pred_today),
+                "ActualToday": (pd.NA if actual_today is None else _round2(actual_today)),
+                "PredictionTomorrow": _round2(pred_tomorrow),
+                "SwitchOff": (switch_off or ""),
+                "SwitchOn": (switch_on or ""),
+            }
+        ]
+    )
+
+    if out_path.exists():
+        old = pd.read_csv(out_path)
+        for c in required:
+            if c not in old.columns:
+                old[c] = pd.NA
+        old["Date"] = old["Date"].astype(str)
+        old = old[old["Date"] != run_day.isoformat()]
+        merged = pd.concat([old, new_row], ignore_index=True)
+    else:
+        merged = new_row
+
+    merged = merged[required].sort_values("Date")
+    merged.to_csv(out_path, index=False)
     return out_path
 
 
@@ -723,13 +729,12 @@ def main() -> None:
     plot_path = save_plot(hourly, run_day)
     print(f"Graf uložen: {plot_path.as_posix()}")
 
-    intraday = build_intraday_30min(cfg, pr_cal, hourly, today)
-    intraday_path = save_intraday_csv(intraday, today)
+    intraday_path = save_intraday_hourly(hourly, today)
     print(f"Intraday CSV uloženo: {intraday_path.as_posix()}")
 
     deleted = cleanup_intraday_files(keep_days=30)
     if deleted:
-        print(f"Intraday cleanup: smazáno {deleted} souborů (starší než 30 dní)")
+        print(f"Smazáno starých intraday souborů: {deleted}")
 
     summary_path = Path(args.out_summary)
     existing = _load_existing_summary(summary_path)
@@ -753,90 +758,6 @@ def main() -> None:
         out_csv=args.out_summary,
     )
     print(f"Souhrn uložen/aktualizován: {out_path.as_posix()}")
-
-
-# --- helpers used above but defined after to keep sections readable ---
-
-def _round2(x: float) -> float:
-    try:
-        return float(round(float(x), 2))
-    except Exception:
-        return float("nan")
-
-
-def _parse_hhmm(s: Any) -> dtime | None:
-    if s is None:
-        return None
-    s = str(s).strip()
-    if not s:
-        return None
-    try:
-        return datetime.strptime(s, "%H:%M").time()
-    except Exception:
-        return None
-
-
-def _hours_between_hhmm(off_s: Any, on_s: Any) -> float:
-    t1 = _parse_hhmm(off_s)
-    t2 = _parse_hhmm(on_s)
-    if not t1 or not t2:
-        return 0.0
-    dt1 = datetime.combine(date(2000, 1, 1), t1)
-    dt2 = datetime.combine(date(2000, 1, 1), t2)
-    if dt2 <= dt1:
-        return 0.0
-    return (dt2 - dt1).total_seconds() / 3600.0
-
-
-def upsert_daily_forecast_summary(
-    run_day: date,
-    pred_today: float,
-    pred_tomorrow: float,
-    actual_today: float | None = None,
-    switch_off: str = "",
-    switch_on: str = "",
-    out_csv: str = "forecasts/forecast_daily_summary.csv",
-) -> Path:
-    out_path = Path(out_csv)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    required = ["Date", "PredictionToday", "ActualToday", "PredictionTomorrow", "SwitchOff", "SwitchOn"]
-
-    new_row = pd.DataFrame([{
-        "Date": run_day.isoformat(),
-        "PredictionToday": _round2(pred_today),
-        "ActualToday": (pd.NA if actual_today is None else _round2(actual_today)),
-        "PredictionTomorrow": _round2(pred_tomorrow),
-        "SwitchOff": (switch_off or ""),
-        "SwitchOn": (switch_on or ""),
-    }])
-
-    if out_path.exists():
-        old = pd.read_csv(out_path)
-        for c in required:
-            if c not in old.columns:
-                old[c] = pd.NA
-        old["Date"] = old["Date"].astype(str)
-        old = old[old["Date"] != run_day.isoformat()]
-        merged = pd.concat([old, new_row], ignore_index=True)
-    else:
-        merged = new_row
-
-    merged = merged[required].sort_values("Date")
-    merged.to_csv(out_path, index=False)
-    return out_path
-
-
-def _load_existing_summary(path: Path) -> pd.DataFrame | None:
-    if not path.exists():
-        return None
-    try:
-        df = pd.read_csv(path)
-        if "Date" in df.columns:
-            df["Date"] = df["Date"].astype(str)
-        return df
-    except Exception:
-        return None
 
 
 if __name__ == "__main__":
