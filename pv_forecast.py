@@ -538,7 +538,7 @@ def build_intraday_30min(cfg: Config, pr_cal: Any | None, hourly_forecast: pd.Da
     # Build a 30-minute grid covering the day (00:00..23:30)
     start = pd.Timestamp(datetime.combine(run_day, dtime(0, 0)))
     end = pd.Timestamp(datetime.combine(run_day, dtime(23, 30)))
-    grid = pd.date_range(start=start, end=end, freq="30T")
+    grid = pd.date_range(start=start, end=end, freq="30min")
 
     # Index hourly inputs by time for interpolation
     src = day_df.set_index("time")
