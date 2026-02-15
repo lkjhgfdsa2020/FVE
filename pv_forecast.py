@@ -289,7 +289,7 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
 # ---------------------------
 
 def pv_kw_from_irr(cfg: Config, irr_wm2: float, pr: float) -> float:
-    \"\"\"PV(kW) ~ pv_kwp * (irradiance / 1000) * PR\"\"\"
+    """PV(kW) ~ pv_kwp * (irradiance / 1000) * PR"""
     try:
         x = float(irr_wm2)
         # Robust against NaN/inf or missing values
