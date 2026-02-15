@@ -1,185 +1,248 @@
-// ui/app.js
-// Dashboard for forecasts/forecast_daily_summary.csv
-// Table columns: Date, PredictionToday, ActualToday, PredictionTomorrow
-// Chart remains Today vs Tomorrow predictions (Actual can be added later if you want).
-
-const CSV_PATH = "../forecasts/forecast_daily_summary.csv"; // relative to /ui/
+/* ui/app.js
+ * Forecast dashboard – reads forecasts/forecast_daily_summary.csv
+ * Columns expected: Date,PredictionToday,ActualToday,PredictionTomorrow,SwitchOff,SwitchOn
+ * (ActualToday can be empty)
+ */
 
 let chart = null;
-let allRows = [];
 
-const $ = (id) => document.getElementById(id);
+const el = (id) => document.getElementById(id);
 
-function toNum(x) {
-  const v = Number(String(x ?? "").trim());
-  return Number.isFinite(v) ? v : null;
-}
+function parseNumber(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
 
-function formatNum(x) {
-  if (x === null || x === undefined || !Number.isFinite(x)) return "";
-  return x.toFixed(2);
+  // if someone ever uses comma decimals
+  const normalized = s.replace(",", ".");
+  const n = Number.parseFloat(normalized);
+  return Number.isFinite(n) ? n : null;
 }
 
 function parseCSV(text) {
-  const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
-  if (parsed.errors?.length) console.warn("CSV parse errors:", parsed.errors);
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").filter(l => l.trim().length > 0);
+  if (lines.length < 2) return [];
 
-  const rows = (parsed.data || [])
-    .map((r) => ({
-      Date: (r.Date || "").trim(),
-      PredictionToday: toNum(r.PredictionToday),
-      ActualToday: toNum(r.ActualToday),
-      PredictionTomorrow: toNum(r.PredictionTomorrow),
-    }))
-    .filter((r) => r.Date);
+  const header = lines[0].split(",").map(h => h.trim());
+  const idx = (name) => header.indexOf(name);
 
-  // Keep in ascending order for time-series correctness
+  const iDate = idx("Date");
+  const iPredT = idx("PredictionToday");
+  const iPredTom = idx("PredictionTomorrow");
+  const iAct = idx("ActualToday");
+
+  if (iDate === -1 || iPredT === -1 || iPredTom === -1) {
+    console.warn("CSV header:", header);
+    throw new Error("CSV missing required columns: Date, PredictionToday, PredictionTomorrow");
+  }
+
+  const rows = [];
+  for (let k = 1; k < lines.length; k++) {
+    const cols = lines[k].split(","); // values in your CSV are simple (no quoted commas)
+    const d = (cols[iDate] ?? "").trim();
+    if (!d) continue;
+
+    rows.push({
+      Date: d,
+      PredictionToday: parseNumber(cols[iPredT]),
+      PredictionTomorrow: parseNumber(cols[iPredTom]),
+      ActualToday: iAct !== -1 ? parseNumber(cols[iAct]) : null,
+    });
+  }
+
+  // sort ascending by Date
   rows.sort((a, b) => a.Date.localeCompare(b.Date));
   return rows;
 }
 
-function updateMeta(rows) {
-  const meta = $("meta");
-  if (!meta) return;
-
-  if (!rows.length) {
-    meta.textContent = " (žádná data)";
-    return;
+async function fetchWithFallback(paths) {
+  let lastErr = null;
+  for (const p of paths) {
+    try {
+      const r = await fetch(p, { cache: "no-store" });
+      if (!r.ok) throw new Error(`HTTP ${r.status} for ${p}`);
+      return await r.text();
+    } catch (e) {
+      lastErr = e;
+    }
   }
-  const first = rows[0].Date;
-  const last = rows[rows.length - 1].Date;
-  meta.textContent = ` • ${rows.length} řádků • ${first} → ${last}`;
+  throw lastErr ?? new Error("Failed to fetch CSV");
 }
 
-function getFilteredRowsForTable() {
-  const q = $("searchInput")?.value?.trim() ?? "";
-  const desc = $("descToggle")?.checked ?? true;
-
-  let rows = allRows;
-  if (q) rows = rows.filter((r) => r.Date.includes(q));
-
-  rows = rows.slice();
-  rows.sort((a, b) => (desc ? b.Date.localeCompare(a.Date) : a.Date.localeCompare(b.Date)));
-  return rows;
+function sliceLast(rows, n) {
+  if (!Number.isFinite(n) || n <= 0) return rows;
+  if (rows.length <= n) return rows;
+  return rows.slice(rows.length - n);
 }
 
-function sliceByDays(rowsAsc) {
-  const n = Number($("daysSelect")?.value ?? 30);
-  if (!n || n <= 0) return rowsAsc;
-  return rowsAsc.slice(Math.max(0, rowsAsc.length - n));
+function computeYMax(values) {
+  const nums = values.filter(v => Number.isFinite(v));
+  if (nums.length === 0) return 5;
+  const m = Math.max(...nums);
+  // add headroom
+  const head = m * 1.15 + 0.5;
+  // round up to 0.5 kWh steps
+  return Math.ceil(head * 2) / 2;
 }
 
-function renderTable() {
-  const tbody = $("tbody");
+function renderChart(rows) {
+  const canvas = el("forecastChart");
+  if (!canvas) return;
+
+  // FIXED HEIGHT to prevent "growing chart"
+  const wrapper = canvas.parentElement;
+  if (wrapper) {
+    wrapper.style.height = "420px";
+    wrapper.style.maxHeight = "420px";
+    wrapper.style.minHeight = "420px";
+  }
+  canvas.style.height = "420px";
+
+  const labels = rows.map(r => r.Date);
+  const predToday = rows.map(r => r.PredictionToday);
+  const predTomorrow = rows.map(r => r.PredictionTomorrow);
+  const actualToday = rows.map(r => r.ActualToday);
+
+  const yMax = computeYMax([...predToday, ...predTomorrow, ...actualToday]);
+
+  const data = {
+    labels,
+    datasets: [
+      {
+        label: "PredictionToday (kWh)",
+        data: predToday,
+        borderWidth: 2,
+        pointRadius: 3,
+        tension: 0.25,
+      },
+      {
+        label: "PredictionTomorrow (kWh)",
+        data: predTomorrow,
+        borderWidth: 2,
+        pointRadius: 3,
+        tension: 0.25,
+      },
+      // If you want to show actuals later, keep it enabled:
+      {
+        label: "ActualToday (kWh)",
+        data: actualToday,
+        borderWidth: 2,
+        pointRadius: 3,
+        tension: 0.25,
+      },
+    ],
+  };
+
+  const options = {
+    responsive: true,
+    maintainAspectRatio: false, // IMPORTANT for fixed height
+    animation: false,
+    scales: {
+      y: {
+        beginAtZero: true,
+        suggestedMax: yMax,
+        ticks: {
+          // show nice numbers
+          callback: (v) => v,
+        },
+      },
+      x: {
+        ticks: {
+          maxRotation: 0,
+          autoSkip: true,
+          maxTicksLimit: 12,
+        },
+      },
+    },
+    plugins: {
+      legend: {
+        display: true,
+      },
+      tooltip: {
+        intersect: false,
+        mode: "index",
+      },
+    },
+    interaction: {
+      intersect: false,
+      mode: "index",
+    },
+  };
+
+  if (chart) {
+    chart.data = data;
+    chart.options = options;
+    chart.update();
+  } else {
+    chart = new Chart(canvas.getContext("2d"), {
+      type: "line",
+      data,
+      options,
+    });
+  }
+}
+
+function renderTable(rows) {
+  const tbody = el("forecastTableBody");
   if (!tbody) return;
 
-  const rows = getFilteredRowsForTable();
   tbody.innerHTML = "";
-
   for (const r of rows) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${r.Date}</td>
-      <td class="num">${formatNum(r.PredictionToday ?? NaN)}</td>
-      <td class="num">${formatNum(r.ActualToday ?? NaN)}</td>
-      <td class="num">${formatNum(r.PredictionTomorrow ?? NaN)}</td>
-    `;
+
+    const tdDate = document.createElement("td");
+    tdDate.textContent = r.Date;
+    tr.appendChild(tdDate);
+
+    const tdP1 = document.createElement("td");
+    tdP1.textContent = (r.PredictionToday == null) ? "" : r.PredictionToday.toFixed(2);
+    tr.appendChild(tdP1);
+
+    const tdA = document.createElement("td");
+    tdA.textContent = (r.ActualToday == null) ? "" : r.ActualToday.toFixed(2);
+    tr.appendChild(tdA);
+
+    const tdP2 = document.createElement("td");
+    tdP2.textContent = (r.PredictionTomorrow == null) ? "" : r.PredictionTomorrow.toFixed(2);
+    tr.appendChild(tdP2);
+
     tbody.appendChild(tr);
   }
 }
 
-function destroyChart() {
-  if (!chart) return;
-  try {
-    chart.destroy();
-  } catch (_) {}
-  chart = null;
+async function loadAndRender() {
+  const daysSelect = el("daysSelect");
+  const nDays = daysSelect ? Number.parseInt(daysSelect.value, 10) : 30;
+
+  // Try multiple paths so it works from /ui/ and from repo root
+  const csvText = await fetchWithFallback([
+    "../forecasts/forecast_daily_summary.csv",
+    "./forecasts/forecast_daily_summary.csv",
+    "/forecasts/forecast_daily_summary.csv",
+  ]);
+
+  const allRows = parseCSV(csvText);
+  const rows = sliceLast(allRows, nDays);
+
+  // Debug: if chart is empty, log what we got
+  console.log("Loaded rows:", rows);
+
+  renderChart(rows);
+  renderTable(rows);
 }
 
-// Create chart with extra-stable options to avoid resize feedback loops.
-// Uses fixed-height wrapper in CSS (.chart-wrap).
-function renderChart() {
-  const canvas = $("chart");
-  if (!canvas) return;
+function hookUI() {
+  const daysSelect = el("daysSelect");
+  if (daysSelect) {
+    daysSelect.addEventListener("change", () => loadAndRender().catch(console.error));
+  }
+}
 
-  // Always chart in ASC order
-  const rowsAsc = allRows.slice().sort((a, b) => a.Date.localeCompare(b.Date));
-  const rows = sliceByDays(rowsAsc);
-
-  const labels = rows.map((r) => r.Date);
-  const today = rows.map((r) => r.PredictionToday ?? 0);
-  const tomorrow = rows.map((r) => r.PredictionTomorrow ?? 0);
-
-  destroyChart();
-
-  chart = new Chart(canvas, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        { label: "PredictionToday (kWh)", data: today, tension: 0.25 },
-        { label: "PredictionTomorrow (kWh)", data: tomorrow, tension: 0.25 },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-
-      // Stability
-      animation: false,
-      parsing: false,
-      normalized: true,
-      resizeDelay: 250,
-
-      // Reduce event churn
-      events: ["mousemove", "mouseout", "click", "touchstart", "touchmove"],
-
-      plugins: {
-        legend: { labels: { color: "#9fb0c3" } },
-        tooltip: { enabled: true },
-      },
-      scales: {
-        x: {
-          ticks: { color: "#9fb0c3", maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
-          grid: { color: "rgba(34,48,67,.4)" },
-        },
-        y: {
-          ticks: { color: "#9fb0c3" },
-          grid: { color: "rgba(34,48,67,.4)" },
-        },
-      },
-    },
+document.addEventListener("DOMContentLoaded", () => {
+  hookUI();
+  loadAndRender().catch((e) => {
+    console.error(e);
+    const msg = el("errorBox");
+    if (msg) msg.textContent = `Error: ${e.message}`;
   });
-}
-
-async function loadData() {
-  // cache-bust so you see fresh CSV after actions run
-  const url = `${CSV_PATH}?v=${Date.now()}`;
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`Failed to fetch CSV: ${res.status} ${res.statusText}`);
-  const text = await res.text();
-
-  allRows = parseCSV(text);
-  updateMeta(allRows);
-
-  renderChart();
-  renderTable();
-}
-
-function wireUI() {
-  $("reloadBtn")?.addEventListener("click", () => loadData().catch((e) => alert(e.message)));
-  $("searchInput")?.addEventListener("input", renderTable);
-  $("descToggle")?.addEventListener("change", renderTable);
-  $("daysSelect")?.addEventListener("change", renderChart);
-
-  // IMPORTANT: no window resize handler calling chart.resize()/update()
-  // Fixed-height wrapper + Chart.js internal resizing avoids feedback loops.
-}
-
-wireUI();
-loadData().catch((e) => {
-  console.error(e);
-  alert(
-    "Nepodařilo se načíst CSV. Zkontroluj, že existuje forecasts/forecast_daily_summary.csv a že je commitnutý."
-  );
 });
