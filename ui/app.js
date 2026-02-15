@@ -31,7 +31,6 @@ function stripBOM(s) {
 }
 
 async function fetchCSV() {
-  // /FVE/ui/ -> ../forecasts/... -> /FVE/forecasts/...
   const url = new URL("../forecasts/forecast_daily_summary.csv", window.location.href);
   url.searchParams.set("_", String(Date.now())); // cache-bust
   const r = await fetch(url.toString(), { cache: "no-store" });
@@ -84,7 +83,6 @@ function applyFilters(rows) {
   const desc = $("descToggle")?.checked ?? true;
 
   let out = rows;
-
   if (search) out = out.filter((r) => r.Date.includes(search));
 
   // table order
@@ -96,7 +94,6 @@ function applyFilters(rows) {
 
   // chart needs chronological
   const chartRows = out.slice().sort((a, b) => a.Date.localeCompare(b.Date));
-
   return { tableRows: out, chartRows };
 }
 
@@ -111,7 +108,7 @@ function computeSuggestedMax(values) {
 function ensureFixedChartHeight() {
   const canvas = $("chart");
   if (!canvas) return;
-  const wrap = canvas.parentElement; // .chart-wrap
+  const wrap = canvas.parentElement;
   if (wrap) {
     wrap.style.height = "420px";
     wrap.style.minHeight = "420px";
@@ -130,7 +127,7 @@ function renderChart(rows) {
     throw new Error("Chart.js is not loaded (Chart is undefined).");
   }
 
-  // IMPORTANT: destroy any existing chart bound to this canvas (even from previous app.js versions)
+  // destroy any existing chart bound to this canvas (even from previous app.js versions)
   const existing = Chart.getChart(canvas);
   if (existing) existing.destroy();
   if (chartInstance) {
@@ -140,10 +137,10 @@ function renderChart(rows) {
 
   const labels = rows.map((r) => r.Date);
   const predToday = rows.map((r) => r.PredictionToday);
-  const predTomorrow = rows.map((r) => r.PredictionTomorrow);
   const actualToday = rows.map((r) => r.ActualToday);
 
-  const suggestedMax = computeSuggestedMax([...predToday, ...predTomorrow, ...actualToday]);
+  // IMPORTANT: PredictionTomorrow removed from chart
+  const suggestedMax = computeSuggestedMax([...predToday, ...actualToday]);
 
   chartInstance = new Chart(canvas.getContext("2d"), {
     type: "line",
@@ -153,14 +150,6 @@ function renderChart(rows) {
         {
           label: "PredictionToday (kWh)",
           data: predToday,
-          borderWidth: 2,
-          pointRadius: 3,
-          tension: 0.25,
-          spanGaps: true,
-        },
-        {
-          label: "PredictionTomorrow (kWh)",
-          data: predTomorrow,
           borderWidth: 2,
           pointRadius: 3,
           tension: 0.25,
@@ -216,6 +205,7 @@ function renderTable(rows) {
     tdA.textContent = r.ActualToday == null ? "" : r.ActualToday.toFixed(2);
     tr.appendChild(tdA);
 
+    // KEEP PredictionTomorrow in the table
     const tdP2 = document.createElement("td");
     tdP2.className = "num";
     tdP2.textContent = r.PredictionTomorrow == null ? "" : r.PredictionTomorrow.toFixed(2);
@@ -255,8 +245,7 @@ function render() {
 async function reload() {
   const csvText = await fetchCSV();
   allRows = parseCSV(csvText);
-
-  console.log("Loaded rows:", allRows); // you already see good data here
+  console.log("Loaded rows:", allRows);
   render();
 }
 
