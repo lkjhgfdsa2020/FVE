@@ -522,65 +522,106 @@ def save_hourly_csv(df_hourly: pd.DataFrame, run_day: date) -> Path:
 
 def build_intraday_30min(cfg: Config, pr_cal: Any | None, hourly_forecast: pd.DataFrame, run_day: date) -> pd.DataFrame:
     """
-    Build 30-minute intraday forecast for a specific day by interpolating hourly irradiance (and cloud cover).
-    Uses:
-      - time (local, cfg.timezone)
-      - irr_wm2 (interpolated)
-      - cloud_cover (interpolated if present)
-      - pr_used (constant for the day)
-      - irr_source (copied from hourly input)
-      - pv_kw_pred (computed from interpolated irr + PR)
-      - step_kwh (pv_kw_pred * 0.5)
+    Build 30-minute intraday forecast for a specific day.
+
+    Strategy (robust across Pandas versions & tz handling):
+      - Slice today's hourly rows.
+      - Force timestamps to timezone-naive local time (drop tzinfo if present).
+      - Create a 30-min grid 00:00..23:30.
+      - Interpolate numeric series using time interpolation on a unified DatetimeIndex.
+      - Prefer interpolating pv_kw_pred directly (it must exist if daily kWh is non-zero),
+        and additionally interpolate irr_wm2 / cloud_cover when available.
+      - step_kwh = pv_kw_pred * 0.5 (kWh per 30-min step)
     """
+    cols = ["time", "pv_kw_pred", "step_kwh", "irr_wm2", "cloud_cover", "pr_used", "irr_source"]
     day_df = hourly_forecast[hourly_forecast["date"] == run_day].copy()
     if day_df.empty:
-        return pd.DataFrame(columns=["time", "pv_kw_pred", "irr_wm2", "cloud_cover", "pr_used", "irr_source", "step_kwh"])
+        return pd.DataFrame(columns=cols)
 
-    day_df = day_df.sort_values("time").reset_index(drop=True)
+    # Ensure datetime and drop tz-info (avoid tz-aware vs tz-naive union issues)
+    day_df["time"] = pd.to_datetime(day_df["time"], errors="coerce")
+    try:
+        if getattr(day_df["time"].dt, "tz", None) is not None:
+            # Convert to local tz (cfg.timezone) if possible, then drop tz
+            day_df["time"] = day_df["time"].dt.tz_convert(cfg.timezone).dt.tz_localize(None)
+        else:
+            # If tz-naive already, keep as-is
+            pass
+    except Exception:
+        # Fallback: just drop tz if it's there
+        try:
+            day_df["time"] = day_df["time"].dt.tz_localize(None)
+        except Exception:
+            pass
 
-    # Build a 30-minute grid covering the day (00:00..23:30)
+    day_df = day_df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
+
     start = pd.Timestamp(datetime.combine(run_day, dtime(0, 0)))
     end = pd.Timestamp(datetime.combine(run_day, dtime(23, 30)))
     grid = pd.date_range(start=start, end=end, freq="30min")
 
-    # Index hourly inputs by time for interpolation
     src = day_df.set_index("time")
-    numeric_cols = ["irr_wm2"]
 
-    # Ensure numeric dtype before time interpolation (Pandas 3.0 is stricter)
-    src["irr_wm2"] = pd.to_numeric(src["irr_wm2"], errors="coerce")
-    if "cloud_cover" in src.columns:
-        src["cloud_cover"] = pd.to_numeric(src["cloud_cover"], errors="coerce")
-        numeric_cols.append("cloud_cover")
+    # Prepare series to interpolate (force numeric)
+    want = []
+    for c in ["pv_kw_pred", "irr_wm2", "cloud_cover"]:
+        if c in src.columns:
+            src[c] = pd.to_numeric(src[c], errors="coerce")
+            want.append(c)
 
-    # Reindex to grid and interpolate
-    tmp = src[numeric_cols].reindex(src.index.union(grid)).sort_index()
-    tmp = tmp.interpolate(method="time").reindex(grid)
+    # If pv_kw_pred is missing (shouldn't happen), compute it from irr_wm2 if possible
+    if "pv_kw_pred" not in want:
+        if "irr_wm2" in src.columns:
+            pr = pr_for_date(pr_cal, cfg, run_day)
+            src["pv_kw_pred"] = [pv_kw_from_irr(cfg, irr, pr) for irr in src["irr_wm2"].tolist()]
+            want.append("pv_kw_pred")
+        else:
+            # Nothing to do
+            out = pd.DataFrame({"time": grid})
+            out["pv_kw_pred"] = 0.0
+            out["step_kwh"] = 0.0
+            out["irr_wm2"] = 0.0
+            out["cloud_cover"] = pd.NA
+            out["pr_used"] = float(pr_for_date(pr_cal, cfg, run_day))
+            out["irr_source"] = "unknown"
+            return out[cols]
+
+    # Time interpolation on unified index
+    idx = src.index.union(grid)
+    tmp = src[want].reindex(idx).sort_index()
+    tmp = tmp.interpolate(method="time")
+    tmp = tmp.reindex(grid)
 
     out = pd.DataFrame({"time": grid})
-    out["date"] = out["time"].dt.date
+    pr = float(pr_for_date(pr_cal, cfg, run_day))
+    out["pr_used"] = pr
 
-    out["irr_wm2"] = pd.to_numeric(tmp["irr_wm2"], errors="coerce").fillna(0.0)
-    out["irr_wm2"] = out["irr_wm2"].fillna(0.0)
-    if "cloud_cover" in tmp.columns:
-        out["cloud_cover"] = pd.to_numeric(tmp["cloud_cover"], errors="coerce")
-    else:
-        out["cloud_cover"] = pd.NA
-
-    pr = pr_for_date(pr_cal, cfg, run_day)
-    out["pr_used"] = float(pr)
-
-    # irr_source is constant across the fetched series (gti or shortwave_radiation)
+    # irr_source constant
     if "irr_source" in day_df.columns and len(day_df["irr_source"].dropna()) > 0:
         out["irr_source"] = str(day_df["irr_source"].dropna().iloc[0])
     else:
         out["irr_source"] = "unknown"
 
-    out["pv_kw_pred"] = [pv_kw_from_irr(cfg, irr, pr) for irr in out["irr_wm2"].tolist()]
-    out["step_kwh"] = out["pv_kw_pred"] * 0.5  # 30 min = 0.5 h
+    # pv_kw_pred (prefer interpolated pv)
+    out["pv_kw_pred"] = pd.to_numeric(tmp.get("pv_kw_pred", pd.Series(index=grid, data=0.0)), errors="coerce").fillna(0.0)
+    out.loc[out["pv_kw_pred"] < 0, "pv_kw_pred"] = 0.0
 
-    # Pretty time string for CSV export
-    return out
+    # irr_wm2 (if missing, approximate from pv_kw_pred)
+    if "irr_wm2" in tmp.columns:
+        out["irr_wm2"] = pd.to_numeric(tmp["irr_wm2"], errors="coerce").fillna(0.0)
+        out.loc[out["irr_wm2"] < 0, "irr_wm2"] = 0.0
+    else:
+        # Invert PV model: pv = pv_kwp * (irr/1000) * pr  => irr = pv/(pv_kwp*pr)*1000
+        denom = max(1e-9, float(cfg.pv_kwp) * pr)
+        out["irr_wm2"] = (out["pv_kw_pred"] / denom) * 1000.0
+
+    if "cloud_cover" in tmp.columns:
+        out["cloud_cover"] = pd.to_numeric(tmp["cloud_cover"], errors="coerce")
+    else:
+        out["cloud_cover"] = pd.NA
+
+    out["step_kwh"] = out["pv_kw_pred"] * 0.5
+    return out[cols]
 
 
 def save_intraday_csv(df_intraday: pd.DataFrame, run_day: date) -> Path:
