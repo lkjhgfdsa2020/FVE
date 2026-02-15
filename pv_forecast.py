@@ -70,7 +70,7 @@ class Config:
     # Battery model
     battery_kwh_total: float = 11.6
     battery_usable_frac: float = 0.90  # usable = total * frac
-    target_soc_evening: float = 0.90   # target at end of day (usable fraction)
+    target_soc_evening: float = 0.85   # target at end of day (usable fraction)
     soc_default_pct: float = 20.0      # used if API returns null/unavailable
 
     # Switch window constraints
@@ -104,7 +104,7 @@ def load_config(path: str = "config.json") -> Config:
         baseload_kw=float(j.get("baseload_kw", 0.50)),
         battery_kwh_total=float(j.get("battery_kwh_total", 11.6)),
         battery_usable_frac=float(j.get("battery_usable_frac", 0.90)),
-        target_soc_evening=float(j.get("target_soc_evening", 0.90)),
+        target_soc_evening=float(j.get("target_soc_evening", 0.85)),
         soc_default_pct=float(j.get("soc_default_pct", 20.0)),
         max_off_hours=float(j.get("max_off_hours", 10.0)),
         switch_search_start_hour=int(j.get("switch_search_start_hour", 8)),
@@ -517,6 +517,107 @@ def save_hourly_csv(df_hourly: pd.DataFrame, run_day: date) -> Path:
     export.to_csv(out_path, index=False)
     return out_path
 
+def build_intraday_30min(cfg: Config, pr_cal: Any | None, hourly_forecast: pd.DataFrame, run_day: date) -> pd.DataFrame:
+    """
+    Build 30-minute intraday forecast for a specific day by interpolating hourly irradiance (and cloud cover).
+    Uses:
+      - time (local, cfg.timezone)
+      - irr_wm2 (interpolated)
+      - cloud_cover (interpolated if present)
+      - pr_used (constant for the day)
+      - irr_source (copied from hourly input)
+      - pv_kw_pred (computed from interpolated irr + PR)
+      - step_kwh (pv_kw_pred * 0.5)
+    """
+    day_df = hourly_forecast[hourly_forecast["date"] == run_day].copy()
+    if day_df.empty:
+        return pd.DataFrame(columns=["time", "pv_kw_pred", "irr_wm2", "cloud_cover", "pr_used", "irr_source", "step_kwh"])
+
+    day_df = day_df.sort_values("time").reset_index(drop=True)
+
+    # Build a 30-minute grid covering the day (00:00..23:30)
+    start = pd.Timestamp(datetime.combine(run_day, dtime(0, 0)))
+    end = pd.Timestamp(datetime.combine(run_day, dtime(23, 30)))
+    grid = pd.date_range(start=start, end=end, freq="30T")
+
+    # Index hourly inputs by time for interpolation
+    src = day_df.set_index("time")
+    numeric_cols = ["irr_wm2"]
+    if "cloud_cover" in src.columns:
+        numeric_cols.append("cloud_cover")
+
+    # Reindex to grid and interpolate
+    tmp = src[numeric_cols].reindex(src.index.union(grid)).sort_index()
+    tmp = tmp.interpolate(method="time").reindex(grid)
+
+    out = pd.DataFrame({"time": grid})
+    out["date"] = out["time"].dt.date
+
+    out["irr_wm2"] = pd.to_numeric(tmp["irr_wm2"], errors="coerce").fillna(0.0)
+    if "cloud_cover" in tmp.columns:
+        out["cloud_cover"] = pd.to_numeric(tmp["cloud_cover"], errors="coerce")
+    else:
+        out["cloud_cover"] = pd.NA
+
+    pr = pr_for_date(pr_cal, cfg, run_day)
+    out["pr_used"] = float(pr)
+
+    # irr_source is constant across the fetched series (gti or shortwave_radiation)
+    if "irr_source" in day_df.columns and len(day_df["irr_source"].dropna()) > 0:
+        out["irr_source"] = str(day_df["irr_source"].dropna().iloc[0])
+    else:
+        out["irr_source"] = "unknown"
+
+    out["pv_kw_pred"] = [pv_kw_from_irr(cfg, irr, pr) for irr in out["irr_wm2"].tolist()]
+    out["step_kwh"] = out["pv_kw_pred"] * 0.5  # 30 min = 0.5 h
+
+    # Pretty time string for CSV export
+    return out
+
+
+def save_intraday_csv(df_intraday: pd.DataFrame, run_day: date) -> Path:
+    out_dir = Path("forecasts") / "intraday"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"forecast_intraday_{run_day.isoformat()}.csv"
+
+    export = df_intraday.copy()
+    export["time"] = export["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    cols = ["time", "pv_kw_pred", "step_kwh", "irr_wm2", "cloud_cover", "pr_used", "irr_source"]
+    # Keep only existing columns in desired order
+    cols = [c for c in cols if c in export.columns]
+    export = export[cols]
+    export.to_csv(out_path, index=False)
+    return out_path
+
+
+def cleanup_intraday_files(keep_days: int = 30) -> int:
+    """
+    Delete intraday forecast CSVs older than keep_days (based on filename date).
+    Returns count of deleted files.
+    """
+    intraday_dir = Path("forecasts") / "intraday"
+    if not intraday_dir.exists():
+        return 0
+
+    today = date.today()
+    deleted = 0
+
+    for p in intraday_dir.glob("forecast_intraday_*.csv"):
+        m = re.search(r"forecast_intraday_(\d{4}-\d{2}-\d{2})\.csv$", p.name)
+        if not m:
+            continue
+        try:
+            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if (today - d).days > int(keep_days):
+            try:
+                p.unlink()
+                deleted += 1
+            except Exception:
+                pass
+    return deleted
+
 
 def save_plot(df_hourly: pd.DataFrame, run_day: date) -> Path:
     out_dir = Path("forecast_plots")
@@ -572,6 +673,14 @@ def main() -> None:
 
     plot_path = save_plot(hourly, run_day)
     print(f"Graf uložen: {plot_path.as_posix()}")
+
+    intraday = build_intraday_30min(cfg, pr_cal, hourly, today)
+    intraday_path = save_intraday_csv(intraday, today)
+    print(f"Intraday CSV uloženo: {intraday_path.as_posix()}")
+
+    deleted = cleanup_intraday_files(keep_days=30)
+    if deleted:
+        print(f"Intraday cleanup: smazáno {deleted} souborů (starší než 30 dní)")
 
     summary_path = Path(args.out_summary)
     existing = _load_existing_summary(summary_path)
