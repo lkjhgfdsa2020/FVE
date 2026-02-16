@@ -168,11 +168,12 @@ function initDefaults() {
     $("tilt").value = saved.tilt ?? "";
     $("az").value = saved.az ?? "";
   } else {
-    $("lat").value = "49.1694";
-    $("lon").value = "16.5097";
-    $("kwp").value = "8.2";
+    // UPDATED DEFAULTS
+    $("lat").value = "49.19483604326329";
+    $("lon").value = "16.60870320672247";
+    $("kwp").value = "10";
     $("tilt").value = "25";
-    $("az").value = "221";
+    $("az").value = "200";
   }
 }
 
