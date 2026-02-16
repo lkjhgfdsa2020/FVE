@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PV Forecast Calculator</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="grid">
+    <div class="card">
+      <h2>PV Forecast Calculator (dnes)</h2>
+      <div class="muted">Timezone: Europe/Prague • PR: 0.82 • Zdroj počasí: Open-Meteo</div>
+    </div>
+
+    <div class="card">
+      <h2>Parametry</h2>
+      <div class="row">
+        <div>
+          <label for="lat">Latitude</label>
+          <input id="lat" type="number" step="0.0001" placeholder="např. 49.1694">
+        </div>
+        <div>
+          <label for="lon">Longitude</label>
+          <input id="lon" type="number" step="0.0001" placeholder="např. 16.5097">
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px;">
+        <div>
+          <label for="kwp">Výkon elektrárny (kWp)</label>
+          <input id="kwp" type="number" step="0.1" placeholder="např. 8.2">
+        </div>
+        <div>
+          <label for="tilt">Sklon střechy (°)</label>
+          <input id="tilt" type="number" step="1" placeholder="0–90, např. 25">
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px;">
+        <div>
+          <label for="az">Azimut (° od severu)</label>
+          <input id="az" type="number" step="1" placeholder="0–360, např. 221">
+        </div>
+        <div class="actions">
+          <button id="btnRun">Spočítat</button>
+          <div class="muted" id="cooldownInfo"></div>
+        </div>
+      </div>
+
+      <div class="error" id="err" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>Výsledek</h2>
+      <div class="kpi">
+        <div>
+          <div class="muted">Predikce dnes (kWh)</div>
+          <div class="kpiValue" id="kwhToday">–</div>
+        </div>
+        <div>
+          <div class="muted">Poznámka</div>
+          <div id="note" class="muted">–</div>
+        </div>
+      </div>
+
+      <div class="chartWrap">
+        <canvas id="chart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
