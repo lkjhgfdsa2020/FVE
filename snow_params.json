@@ -1,11 +1,13 @@
 {
-  "k": 0.85,
-  "t_acc": 0.0,
-  "t_melt": 2.0,
-  "a_snowfall": 0.12,
-  "b_melt": 0.03,
-  "b_rain": 0.12,
-  "b_sun": 0.02,
+  "k": 0.97,
+  "t_acc": 1.0,
+  "t_melt": 1.0,
+  "a_snowfall": 0.06,
+  "b_melt": 0.015,
+  "b_rain": 0.06,
+  "b_sun": 0.04,
   "a_depth": 0.0,
-  "b_passive": 0.0
+  "b_passive": 0.0,
+  "mae_kwh_day": 6.564944544253585,
+  "mape_percent": 68.53050769942082
 }
