@@ -22,4 +22,7 @@
   "pr_calendar_path": "pr_calendar.json",
 
   "soc_8am": 20
+
+  "snow_enabled": true,
+  "snow_params_path": "snow_params.json"
 }
