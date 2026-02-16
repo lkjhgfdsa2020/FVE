@@ -1,0 +1,11 @@
+{
+  "k": 0.85,
+  "t_acc": 0.0,
+  "t_melt": 2.0,
+  "a_snowfall": 0.12,
+  "b_melt": 0.03,
+  "b_rain": 0.12,
+  "b_sun": 0.02,
+  "a_depth": 0.0,
+  "b_passive": 0.0
+}
