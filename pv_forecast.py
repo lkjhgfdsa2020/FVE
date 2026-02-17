@@ -256,10 +256,10 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
     swr = j["hourly"].get("shortwave_radiation", None)
 
     if gti is not None:
-        df["irr_wm2"] = pd.to_numeric(gti, errors="coerce").fillna(0.0)
+        df["irr_wm2"] = pd.Series(pd.to_numeric(gti, errors="coerce")).fillna(0.0)
         df["irr_source"] = "gti"
     elif swr is not None:
-        df["irr_wm2"] = pd.to_numeric(swr, errors="coerce").fillna(0.0)
+        df["irr_wm2"] = pd.Series(pd.to_numeric(swr, errors="coerce")).fillna(0.0)
         df["irr_source"] = "shortwave_radiation"
     else:
         raise RuntimeError("Open-Meteo did not return GTI nor shortwave_radiation.")
