@@ -1,6 +1,7 @@
 data/solax/
 *.xlsx
 logs/
+monitor/
 forecast_outputs/
 cache/openmeteo/
 config.json
