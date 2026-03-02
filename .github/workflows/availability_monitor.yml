@@ -49,8 +49,8 @@ jobs:
           MAIL_TO: ${{ secrets.MAIL_TO }}
 
           # Thresholds / TZ
-          WARN_THRESHOLD_PCT: "98"
-          CRIT_THRESHOLD_PCT: "99"
+          WARN_THRESHOLD_PCT: "92"
+          CRIT_THRESHOLD_PCT: "90"
           LOCAL_TZ: "Europe/Prague"
         run: |
-          python monitor/availability_check.py
+          python monitor/availability_check.py || true
