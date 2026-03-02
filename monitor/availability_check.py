@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """Availability monitor for inverter connection/control percentages (E.ON DeltaGreen).
 
-Auth model observed from browser request:
-- Cookie-based session: proteus_session=...
-- CSRF cookie: proteus_csrf=...
-- CSRF header required: x-proteus-csrf: <same value as proteus_csrf>
+Key points:
+- Auth is cookie + CSRF header:
+    Cookie includes proteus_session and proteus_csrf
+    Header x-proteus-csrf must match proteus_csrf
+- Endpoint is tRPC batch. It often returns JSONL when 'trpc-accept: application/jsonl'
+  is used, which breaks requests' r.json() (JSONDecodeError: Extra data).
+  This script handles BOTH JSON and JSONL.
 
-This script:
-- Fetches current-month record (Europe/Prague) and reads:
-    * dataPointPercentage -> DisponibilitaPripojeni (0..1)
-    * controlPercentage   -> DisponibilitaRizeni   (0..1)
-- Notifies via email (Gmail app password) when level changes:
-    OK <-> WARN (<92%) <-> CRIT (<90%)
+Metrics (fractions 0..1):
+- dataPointPercentage -> DisponibilitaPripojeni
+- controlPercentage   -> DisponibilitaRizeni
 
-Secrets/env expected (GitHub Actions):
-- AVAILABILITY_API_URL
-- AVAILABILITY_COOKIE
-- AVAILABILITY_CSRF
-- AVAILABILITY_REFERER (recommended)
-- AVAILABILITY_USER_AGENT (optional)
-
-- SMTP_USER, SMTP_PASSWORD, MAIL_TO, MAIL_FROM (optional)
+Email notify (Gmail app password) on level changes:
+- WARN when either < 92%
+- CRIT when either < 90%
 """
 
 from __future__ import annotations
@@ -36,6 +31,7 @@ from email.message import EmailMessage
 from typing import Any, Dict, Optional, Tuple
 
 import requests
+from requests.exceptions import JSONDecodeError as RequestsJSONDecodeError
 from zoneinfo import ZoneInfo
 
 STATE_PATH = os.environ.get("STATE_PATH", "monitor/state.json")
@@ -137,7 +133,8 @@ def _build_headers() -> Dict[str, str]:
 
     headers["accept"] = "application/json"
     headers["content-type"] = "application/json"
-    headers["trpc-accept"] = "application/jsonl"
+    # Prefer JSON (not JSONL). Many tRPC endpoints will honor this.
+    headers["trpc-accept"] = "application/json"
 
     ua = os.environ.get(
         "AVAILABILITY_USER_AGENT",
@@ -146,6 +143,21 @@ def _build_headers() -> Dict[str, str]:
     headers["user-agent"] = _sanitize_single_line(ua) or ua
 
     return headers
+
+
+def _parse_trpc_response(r: requests.Response) -> Any:
+    """Parse response supporting JSON and JSONL."""
+    try:
+        return r.json()
+    except (RequestsJSONDecodeError, ValueError):
+        # Likely JSONL: one JSON object per line.
+        lines = [ln.strip() for ln in (r.text or "").splitlines() if ln.strip()]
+        if not lines:
+            raise
+        objs = []
+        for ln in lines:
+            objs.append(json.loads(ln))
+        return objs
 
 
 def fetch_current_month_availability() -> AvailabilitySample:
@@ -160,7 +172,7 @@ def fetch_current_month_availability() -> AvailabilitySample:
         print(f"HTTP {r.status_code} from API. Body (first 500 chars):\n{snippet}", file=sys.stderr)
         raise
 
-    data = r.json()
+    data = _parse_trpc_response(r)
 
     def find_records(obj: Any) -> Optional[list[dict]]:
         if isinstance(obj, dict):
