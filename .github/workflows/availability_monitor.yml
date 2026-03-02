@@ -33,9 +33,12 @@ jobs:
 
       - name: Run availability check (email notify)
         env:
+          # API (cookie + CSRF)
           AVAILABILITY_API_URL: ${{ secrets.AVAILABILITY_API_URL }}
-          AVAILABILITY_API_TOKEN: ${{ secrets.AVAILABILITY_API_TOKEN }}
           AVAILABILITY_COOKIE: ${{ secrets.AVAILABILITY_COOKIE }}
+          AVAILABILITY_CSRF: ${{ secrets.AVAILABILITY_CSRF }}
+          AVAILABILITY_REFERER: ${{ secrets.AVAILABILITY_REFERER }}
+          AVAILABILITY_USER_AGENT: ${{ secrets.AVAILABILITY_USER_AGENT }}
 
           # Email (Gmail app password)
           SMTP_HOST: smtp.gmail.com
@@ -45,6 +48,7 @@ jobs:
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
 
+          # Thresholds / TZ
           WARN_THRESHOLD_PCT: "92"
           CRIT_THRESHOLD_PCT: "90"
           LOCAL_TZ: "Europe/Prague"
