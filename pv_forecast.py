@@ -360,7 +360,7 @@ def apply_snow_correction(cfg: Config, df: pd.DataFrame) -> pd.DataFrame:
 
 def _month_off_budget_hours(year: int, month: int) -> float:
     days_in_month = calendar.monthrange(year, month)[1]
-    return 0.20 * days_in_month * 24.0
+    return 0.10 * days_in_month * 24.0
 
 
 def _parse_hhmm(s: Any) -> dtime | None:
