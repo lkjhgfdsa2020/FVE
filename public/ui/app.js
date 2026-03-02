@@ -39,11 +39,18 @@ function validateInputs(lat, lon, kwp, tilt, az) {
 
 function toNum(x) { const v = Number(x); return Number.isFinite(v) ? v : null; }
 
-async function fetchOpenMeteoHourly(lat, lon) {
+async function fetchOpenMeteoHourly(lat, lon, tiltDeg, azFromNorthDeg) {
   const url = new URL("https://api.open-meteo.com/v1/forecast");
   url.searchParams.set("latitude", String(lat));
   url.searchParams.set("longitude", String(lon));
   url.searchParams.set("timezone", TZ);
+// Open-Meteo expects:
+// - tilt: degrees from horizontal (0..90)
+// - azimuth: degrees from South (0=S, -90=E, +90=W, ±180=N)
+// UI input az is degrees clockwise from North (0=N, 90=E, 180=S, 270=W)
+const azOpen = ((((azFromNorthDeg - 180) + 180) % 360) - 180);
+url.searchParams.set("tilt", String(tiltDeg));
+url.searchParams.set("azimuth", String(azOpen));
   url.searchParams.set("forecast_days", "1");
   url.searchParams.set("hourly", "global_tilted_irradiance,shortwave_radiation,cloud_cover");
 
@@ -130,7 +137,7 @@ async function run() {
 
   $("btnRun").disabled = true;
 
-  const hourly = await fetchOpenMeteoHourly(lat, lon);
+  const hourly = await fetchOpenMeteoHourly(lat, lon, tilt, az);
   const todayDate = parseDatePart(hourly[0]?.time);
   if (!todayDate) throw new Error("Nelze určit dnešní datum z Open-Meteo.");
 
