@@ -234,14 +234,14 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
     ]
 
     
-    # NOTE: Open-Meteo's `global_tilted_irradiance` depends on `tilt` + `azimuth` query parameters.
-    # - cfg.azimuth_deg_from_north is degrees clockwise from North (0=N, 90=E, 180=S, 270=W).
-    # - Open-Meteo expects azimuth as degrees from South (0=S, -90=E, +90=W, ±180=N).
-    az_open = cfg.azimuth_deg_from_north - 180.0
-    # wrap to [-180, 180]
-    az_open = ((az_open + 180.0) % 360.0) - 180.0
+# NOTE: Open-Meteo's `global_tilted_irradiance` depends on `tilt` + `azimuth` query parameters.
+# - cfg.azimuth_deg_from_north is degrees clockwise from North (0=N, 90=E, 180=S, 270=W).
+# - Open-Meteo expects azimuth as degrees from South (0=S, -90=E, +90=W, ±180=N).
+az_open = cfg.azimuth_deg_from_north - 180.0
+# wrap to [-180, 180]
+az_open = ((az_open + 180.0) % 360.0) - 180.0
 
-    params = {
+params = {
         "latitude": cfg.latitude,
         "longitude": cfg.longitude,
         "timezone": cfg.timezone,
@@ -360,7 +360,7 @@ def apply_snow_correction(cfg: Config, df: pd.DataFrame) -> pd.DataFrame:
 
 def _month_off_budget_hours(year: int, month: int) -> float:
     days_in_month = calendar.monthrange(year, month)[1]
-    return 0.10 * days_in_month * 24.0
+    return 0.20 * days_in_month * 24.0
 
 
 def _parse_hhmm(s: Any) -> dtime | None:
