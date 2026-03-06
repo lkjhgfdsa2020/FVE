@@ -1,225 +1,323 @@
-// public/ui/app.js
-// Public browser-only PV forecast calculator (today only)
-//
-// - Timezone fixed: Europe/Prague
-// - PR fixed: 0.82
-// - Request throttle: 30s per browser (localStorage)
+/* ui/app.js
+ * Dashboard for forecasts/forecast_daily_summary.csv + intraday hourly curve.
+ */
 
-const TZ = "Europe/Prague";
-const PR = 0.82;
-const THROTTLE_MS = 30_000;
+let chartDaily = null;
+let chartIntraday = null;
+let allRows = [];
 
-let chart = null;
+const $ = (id) => document.getElementById(id);
 
-function $(id) { return document.getElementById(id); }
-
-function setError(msg) { $("err").textContent = msg || ""; }
-
-function setCooldownInfo(msRemaining) {
-  if (!msRemaining || msRemaining <= 0) { $("cooldownInfo").textContent = ""; return; }
-  const s = Math.ceil(msRemaining / 1000);
-  $("cooldownInfo").textContent = `Další výpočet za ${s}s`;
+function parseNumber(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  const n = Number.parseFloat(s.replace(",", "."));
+  return Number.isFinite(n) ? n : null;
 }
 
-function getLastRunTs() {
-  const v = localStorage.getItem("pv_calc_last_run_ts");
-  return v ? Number(v) : 0;
-}
-function setLastRunTs(ts) { localStorage.setItem("pv_calc_last_run_ts", String(ts)); }
-
-function validateInputs(lat, lon, kwp, tilt, az) {
-  const errs = [];
-  if (!Number.isFinite(lat) || lat < -90 || lat > 90) errs.push("Latitude musí být v rozsahu -90 až 90.");
-  if (!Number.isFinite(lon) || lon < -180 || lon > 180) errs.push("Longitude musí být v rozsahu -180 až 180.");
-  if (!Number.isFinite(kwp) || kwp <= 0 || kwp > 100) errs.push("kWp musí být v rozsahu 0 až 100.");
-  if (!Number.isFinite(tilt) || tilt < 0 || tilt > 90) errs.push("Sklon musí být v rozsahu 0 až 90 stupňů.");
-  if (!Number.isFinite(az) || az < 0 || az >= 360) errs.push("Azimut musí být v rozsahu 0 až <360 stupňů (od severu).");
-  return errs;
+function stripBOM(s) {
+  if (!s) return s;
+  return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
 }
 
-function toNum(x) { const v = Number(x); return Number.isFinite(v) ? v : null; }
-
-async function fetchOpenMeteoHourly(lat, lon, tiltDeg, azFromNorthDeg) {
-  const url = new URL("https://api.open-meteo.com/v1/forecast");
-  url.searchParams.set("latitude", String(lat));
-  url.searchParams.set("longitude", String(lon));
-  url.searchParams.set("timezone", TZ);
-// Open-Meteo expects:
-// - tilt: degrees from horizontal (0..90)
-// - azimuth: degrees from South (0=S, -90=E, +90=W, ±180=N)
-// UI input az is degrees clockwise from North (0=N, 90=E, 180=S, 270=W)
-const azOpen = ((((azFromNorthDeg - 180) + 180) % 360) - 180);
-url.searchParams.set("tilt", String(tiltDeg));
-url.searchParams.set("azimuth", String(azOpen));
-  url.searchParams.set("forecast_days", "1");
-  url.searchParams.set("hourly", "global_tilted_irradiance,shortwave_radiation,cloud_cover");
-
-  const r = await fetch(url.toString(), { method: "GET" });
-  if (!r.ok) throw new Error(`Open-Meteo HTTP ${r.status}`);
-  const j = await r.json();
-  if (!j.hourly || !j.hourly.time) throw new Error("Open-Meteo response missing hourly time series.");
-
-  const times = j.hourly.time;
-  const gti = j.hourly.global_tilted_irradiance || null;
-  const swr = j.hourly.shortwave_radiation || null;
-  const cloud = j.hourly.cloud_cover || null;
-
-  const irrSource = Array.isArray(gti) ? "gti" : (Array.isArray(swr) ? "shortwave_radiation" : null);
-  if (!irrSource) throw new Error("Open-Meteo did not return irradiance series.");
-
-  const irrArr = irrSource === "gti" ? gti : swr;
-
-  return times.map((t, i) => ({
-    time: String(t),
-    irr_wm2: toNum(irrArr[i]),
-    cloud_cover: cloud ? toNum(cloud[i]) : null,
-    irr_source: irrSource
-  }));
+async function fetchText(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`Fetch failed: ${url} (HTTP ${r.status})`);
+  return await r.text();
 }
 
-function pvKwFromIrr(kwp, irr_wm2) {
-  const irr = Number.isFinite(irr_wm2) ? irr_wm2 : 0;
-  if (irr <= 0) return 0;
-  return kwp * (irr / 1000.0) * PR;
+async function fetchDailyCSV() {
+  const url = new URL("../forecasts/forecast_daily_summary.csv", window.location.href);
+  url.searchParams.set("_", String(Date.now()));
+  return await fetchText(url.toString());
 }
 
-function round2(x) { return Math.round(x * 100) / 100; }
+async function fetchIntradayCSV(yyyy_mm_dd) {
+  const url = new URL(`../forecasts/intraday/forecast_intraday_${yyyy_mm_dd}.csv`, window.location.href);
+  url.searchParams.set("_", String(Date.now()));
+  return await fetchText(url.toString());
+}
 
-function renderChart(labels, pvKw) {
-  const ctx = $("chart").getContext("2d");
-  if (chart) { chart.destroy(); chart = null; }
+function parseDailyCSV(text) {
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter((l) => l.trim().length > 0);
 
-  chart = new Chart(ctx, {
+  if (lines.length < 2) return [];
+
+  const header = lines[0].split(",").map((h) => stripBOM(h.trim()));
+  const idx = (name) => header.indexOf(name);
+
+  const iDate = idx("Date");
+  const iPredToday = idx("PredictionToday");
+  const iActual = idx("ActualToday");
+  const iPredTomorrow = idx("PredictionTomorrow");
+
+  if (iDate === -1 || iPredToday === -1 || iPredTomorrow === -1) {
+    console.warn("CSV header:", header);
+    throw new Error("CSV missing required columns: Date, PredictionToday, PredictionTomorrow");
+  }
+
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    const d = (cols[iDate] ?? "").trim();
+    if (!d) continue;
+
+    rows.push({
+      Date: d,
+      PredictionToday: parseNumber(cols[iPredToday]),
+      ActualToday: iActual !== -1 ? parseNumber(cols[iActual]) : null,
+      PredictionTomorrow: parseNumber(cols[iPredTomorrow]),
+    });
+  }
+
+  rows.sort((a, b) => a.Date.localeCompare(b.Date));
+  return rows;
+}
+
+function parseIntradayCSV(text) {
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter((l) => l.trim().length > 0);
+
+  if (lines.length < 2) return [];
+
+  const header = lines[0].split(",").map((h) => stripBOM(h.trim()));
+  const idx = (name) => header.indexOf(name);
+
+  const iTime = idx("time");
+  const iPv = idx("pv_kw_pred");
+
+  if (iTime === -1 || iPv === -1) {
+    console.warn("Intraday header:", header);
+    throw new Error("Intraday CSV missing required columns: time, pv_kw_pred");
+  }
+
+  const points = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    const t = (cols[iTime] ?? "").trim();
+    if (!t) continue;
+    points.push({
+      time: t,
+      pv_kw_pred: parseNumber(cols[iPv]) ?? 0,
+    });
+  }
+  return points;
+}
+
+function applyFilters(rows) {
+  const search = ($("searchInput")?.value || "").trim();
+  const desc = $("descToggle")?.checked ?? true;
+
+  let out = rows;
+  if (search) out = out.filter((r) => r.Date.includes(search));
+
+  out = out.slice().sort((a, b) => (desc ? b.Date.localeCompare(a.Date) : a.Date.localeCompare(b.Date)));
+
+  const nDays = $("daysSelect") ? Number.parseInt($("daysSelect").value, 10) : 30;
+  if (Number.isFinite(nDays) && nDays > 0 && out.length > nDays) out = out.slice(0, nDays);
+
+  const chartRows = out.slice().sort((a, b) => a.Date.localeCompare(b.Date));
+  return { tableRows: out, chartRows };
+}
+
+function computeSuggestedMax(values) {
+  const nums = values.filter((v) => Number.isFinite(v));
+  if (nums.length === 0) return 5;
+  const m = Math.max(...nums);
+  const head = m * 1.15 + 0.5;
+  return Math.ceil(head * 2) / 2;
+}
+
+function ensureFixedHeight(canvasId, heightPx) {
+  const canvas = $(canvasId);
+  if (!canvas) return;
+  const wrap = canvas.parentElement;
+  if (wrap) {
+    wrap.style.height = `${heightPx}px`;
+    wrap.style.minHeight = `${heightPx}px`;
+    wrap.style.maxHeight = `${heightPx}px`;
+  }
+  canvas.style.height = `${heightPx}px`;
+}
+
+function destroyChart(canvas, instance) {
+  if (!canvas || typeof Chart === "undefined") return null;
+  const existing = Chart.getChart(canvas);
+  if (existing) existing.destroy();
+  if (instance) {
+    try {
+      instance.destroy();
+    } catch (_) {}
+  }
+  return null;
+}
+
+function renderDailyChart(rows) {
+  const canvas = $("chartDaily");
+  if (!canvas) return;
+  ensureFixedHeight("chartDaily", 380);
+
+  if (typeof Chart === "undefined") throw new Error("Chart.js not loaded.");
+
+  chartDaily = destroyChart(canvas, chartDaily);
+
+  const labels = rows.map((r) => r.Date);
+  const predToday = rows.map((r) => r.PredictionToday);
+  const actualToday = rows.map((r) => r.ActualToday);
+
+  const suggestedMax = computeSuggestedMax([...predToday, ...actualToday]);
+
+  chartDaily = new Chart(canvas.getContext("2d"), {
     type: "line",
     data: {
       labels,
-      datasets: [{
-        label: "Predikovaný výkon (kW)",
-        data: pvKw,
-        tension: 0.25,
-        pointRadius: 0
-      }]
+      datasets: [
+        { label: "PredictionToday (kWh)", data: predToday, borderWidth: 2, pointRadius: 3, tension: 0.25, spanGaps: true },
+        { label: "ActualToday (kWh)", data: actualToday, borderWidth: 2, pointRadius: 3, tension: 0.25, spanGaps: true },
+      ],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      scales: {
-        y: { title: { display: true, text: "kW" }, beginAtZero: true },
-        x: { title: { display: true, text: `Čas (${TZ})` } }
-      },
-      plugins: { legend: { display: true } }
-    }
+      scales: { y: { beginAtZero: true, suggestedMax }, x: { ticks: { autoSkip: true, maxTicksLimit: 12, maxRotation: 0 } } },
+      plugins: { legend: { display: true }, tooltip: { intersect: false, mode: "index" } },
+      interaction: { intersect: false, mode: "index" },
+    },
   });
 }
 
-function parseDatePart(timeStr) { return timeStr ? String(timeStr).slice(0, 10) : null; }
+function renderIntradayChart(points) {
+  const canvas = $("chartIntraday");
+  const msg = $("intradayMsg");
+  if (!canvas) return;
 
-async function run() {
-  setError("");
+  ensureFixedHeight("chartIntraday", 320);
 
-  const now = Date.now();
-  const last = getLastRunTs();
-  const remaining = THROTTLE_MS - (now - last);
-  if (remaining > 0) {
-    setCooldownInfo(remaining);
-    throw new Error(`Z důvodu limitu lze spustit výpočet nejdříve za ${Math.ceil(remaining/1000)}s.`);
+  if (!points || points.length === 0) {
+    if (msg) msg.textContent = "Intraday forecast pro dnešek není k dispozici.";
+    chartIntraday = destroyChart(canvas, chartIntraday);
+    return;
   }
+  if (msg) msg.textContent = "";
 
-  const lat = Number($("lat").value);
-  const lon = Number($("lon").value);
-  const kwp = Number($("kwp").value);
-  const tilt = Number($("tilt").value); // reserved for future
-  const az = Number($("az").value);     // reserved for future
+  if (typeof Chart === "undefined") throw new Error("Chart.js not loaded.");
 
-  const errs = validateInputs(lat, lon, kwp, tilt, az);
-  if (errs.length) throw new Error(errs.join("\n"));
+  chartIntraday = destroyChart(canvas, chartIntraday);
 
-  $("btnRun").disabled = true;
+  const labels = points.map((p) => p.time.slice(11, 16)); // HH:MM
+  const pv = points.map((p) => p.pv_kw_pred);
 
-  const hourly = await fetchOpenMeteoHourly(lat, lon, tilt, az);
-  const todayDate = parseDatePart(hourly[0]?.time);
-  if (!todayDate) throw new Error("Nelze určit dnešní datum z Open-Meteo.");
+  const suggestedMax = computeSuggestedMax(pv);
 
-  const labels = [];
-  const pvKw = [];
-  let kwhSum = 0;
-
-  for (const r of hourly) {
-    const t = r.time;
-    if (parseDatePart(t) !== todayDate) continue;
-
-    const hhmm = t.includes("T") ? t.slice(11, 16) : t.slice(11, 16);
-    const kw = pvKwFromIrr(kwp, r.irr_wm2);
-
-    labels.push(hhmm);
-    pvKw.push(round2(kw));
-    kwhSum += kw; // 1 hour step
-  }
-
-  $("kwhToday").textContent = round2(kwhSum).toFixed(2);
-  $("note").textContent = `Datum: ${todayDate} • Irr source: ${hourly[0]?.irr_source || "?"} • PR=${PR}`;
-
-  renderChart(labels, pvKw);
-
-  setLastRunTs(Date.now());
-  setCooldownInfo(THROTTLE_MS);
-}
-
-function initDefaults() {
-  const saved = JSON.parse(localStorage.getItem("pv_calc_defaults") || "null");
-  if (saved) {
-    $("lat").value = saved.lat ?? "";
-    $("lon").value = saved.lon ?? "";
-    $("kwp").value = saved.kwp ?? "";
-    $("tilt").value = saved.tilt ?? "";
-    $("az").value = saved.az ?? "";
-  } else {
-    // UPDATED DEFAULTS
-    $("lat").value = "49.19483604326329";
-    $("lon").value = "16.60870320672247";
-    $("kwp").value = "10";
-    $("tilt").value = "25";
-    $("az").value = "200";
-  }
-}
-
-function saveDefaults() {
-  const obj = {
-    lat: $("lat").value,
-    lon: $("lon").value,
-    kwp: $("kwp").value,
-    tilt: $("tilt").value,
-    az: $("az").value
-  };
-  localStorage.setItem("pv_calc_defaults", JSON.stringify(obj));
-}
-
-function hookEvents() {
-  $("btnRun").addEventListener("click", async () => {
-    try {
-      $("btnRun").disabled = true;
-      await run();
-      saveDefaults();
-    } catch (e) {
-      setError(String(e?.message || e));
-    } finally {
-      $("btnRun").disabled = false;
-    }
+  chartIntraday = new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{ label: "PV pred (kW) – dnes (hourly)", data: pv, borderWidth: 2, pointRadius: 2, tension: 0.25, spanGaps: true }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: { y: { beginAtZero: true, suggestedMax }, x: { ticks: { autoSkip: true, maxTicksLimit: 12, maxRotation: 0 } } },
+      plugins: { legend: { display: true }, tooltip: { intersect: false, mode: "index" } },
+      interaction: { intersect: false, mode: "index" },
+    },
   });
-
-  const now = Date.now();
-  const last = getLastRunTs();
-  const remaining = THROTTLE_MS - (now - last);
-  if (remaining > 0) setCooldownInfo(remaining);
-
-  setInterval(() => {
-    const now2 = Date.now();
-    const last2 = getLastRunTs();
-    const rem2 = THROTTLE_MS - (now2 - last2);
-    setCooldownInfo(rem2);
-  }, 500);
 }
 
-initDefaults();
-hookEvents();
+function renderTable(rows) {
+  const tbody = $("tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+
+    const tdDate = document.createElement("td");
+    tdDate.textContent = r.Date;
+    tr.appendChild(tdDate);
+
+    const tdP1 = document.createElement("td");
+    tdP1.className = "num";
+    tdP1.textContent = r.PredictionToday == null ? "" : r.PredictionToday.toFixed(2);
+    tr.appendChild(tdP1);
+
+    const tdA = document.createElement("td");
+    tdA.className = "num";
+    tdA.textContent = r.ActualToday == null ? "" : r.ActualToday.toFixed(2);
+    tr.appendChild(tdA);
+
+    const tdP2 = document.createElement("td");
+    tdP2.className = "num";
+    tdP2.textContent = r.PredictionTomorrow == null ? "" : r.PredictionTomorrow.toFixed(2);
+    tr.appendChild(tdP2);
+
+    tbody.appendChild(tr);
+  }
+}
+
+function updateMeta(rows) {
+  const meta = $("meta");
+  if (!meta) return;
+  meta.textContent = rows && rows.length ? ` (${rows.length} řádků)` : "";
+}
+
+function todayPragueISO() {
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Prague", year: "numeric", month: "2-digit", day: "2-digit" });
+  return fmt.format(new Date()); // YYYY-MM-DD
+}
+
+function render() {
+  const { tableRows, chartRows } = applyFilters(allRows);
+  renderTable(tableRows);
+  try {
+    renderDailyChart(chartRows);
+  } catch (e) {
+    console.error("Daily chart failed:", e);
+  }
+  updateMeta(allRows);
+}
+
+async function reload() {
+  const dailyText = await fetchDailyCSV();
+  allRows = parseDailyCSV(dailyText);
+  console.log("Loaded daily rows:", allRows);
+  render();
+
+  const iso = todayPragueISO();
+  try {
+    const intradayText = await fetchIntradayCSV(iso);
+    const points = parseIntradayCSV(intradayText);
+    console.log("Loaded intraday points:", points.length);
+    renderIntradayChart(points);
+  } catch (e) {
+    console.warn("Intraday not available:", e);
+    renderIntradayChart([]);
+  }
+}
+
+function hookUI() {
+  $("reloadBtn")?.addEventListener("click", () => reload().catch(console.error));
+  $("daysSelect")?.addEventListener("change", () => render());
+  $("descToggle")?.addEventListener("change", () => render());
+  $("searchInput")?.addEventListener("input", () => render());
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  hookUI();
+  reload().catch((e) => {
+    console.error(e);
+    const meta = $("meta");
+    if (meta) meta.textContent = ` (chyba: ${e.message})`;
+  });
+});
