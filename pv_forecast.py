@@ -494,27 +494,49 @@ def recommend_switch_window_smart(
     cfg: Config,
     summary_existing: pd.DataFrame | None,
     soc_start_pct: float,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, dict[str, Any]]:
+    trace: dict[str, Any] = {
+        "run_day": run_day.isoformat(),
+        "pred_today_kwh": float(pred_today_kwh),
+        "soc_start_pct": float(soc_start_pct),
+        "min_pred_kwh_for_switch": float(cfg.min_pred_kwh_for_switch),
+        "monthly_off_allowance_frac": float(cfg.monthly_off_allowance_frac),
+        "max_off_hours": float(cfg.max_off_hours),
+        "search_window_hours": [int(cfg.switch_search_start_hour), int(cfg.switch_search_end_hour)],
+    }
     if float(pred_today_kwh) < float(cfg.min_pred_kwh_for_switch):
-        return ("", "")
+        trace["decision"] = "no_switch"
+        trace["reason"] = "pred_today_below_threshold"
+        return ("", "", trace)
 
     today = hourly_df[hourly_df["date"] == run_day].copy()
     if today.empty:
-        return ("", "")
+        trace["decision"] = "no_switch"
+        trace["reason"] = "no_hourly_rows_for_day"
+        return ("", "", trace)
 
     today = today.sort_values("time")
     pv = pd.to_numeric(today["pv_kw_pred"], errors="coerce").fillna(0.0).tolist()
     hours = today["time"].dt.hour.astype(int).tolist()
+    trace["hourly_points"] = len(pv)
     if len(pv) < 8:
-        return ("", "")
+        trace["decision"] = "no_switch"
+        trace["reason"] = "insufficient_hourly_points"
+        return ("", "", trace)
 
     year, month = run_day.year, run_day.month
     month_key = f"{year:04d}-{month:02d}"
     used = _used_off_hours_from_availability(run_day)
     if used is None:
-        return ("", "")
+        trace["decision"] = "no_switch"
+        trace["reason"] = "availability_unavailable"
+        return ("", "", trace)
     allowance_so_far = _elapsed_month_off_allowance_hours(run_day, cfg.monthly_off_allowance_frac)
     remaining_allowance_so_far = max(0.0, allowance_so_far - used)
+    trace["month_key"] = month_key
+    trace["used_off_hours_so_far"] = float(used)
+    trace["allowance_so_far_hours"] = float(allowance_so_far)
+    trace["remaining_allowance_so_far_hours"] = float(remaining_allowance_so_far)
 
     # allocate more budget to higher-than-average days (within month)
     month_mean_pred = None
@@ -537,21 +559,29 @@ def recommend_switch_window_smart(
     else:
         weight = 1.0
 
+    trace["month_mean_pred_kwh"] = (None if month_mean_pred is None else float(month_mean_pred))
+    trace["weight"] = float(weight)
+
     alloc_today = min(
         float(cfg.max_off_hours),
         remaining_allowance_so_far,
         remaining_allowance_so_far * weight,
     )
+    trace["alloc_today_hours"] = float(alloc_today)
     if alloc_today < 0.75:
-        return ("", "")
+        trace["decision"] = "no_switch"
+        trace["reason"] = "alloc_below_minimum"
+        return ("", "", trace)
 
     maxL = max(1, int(round(alloc_today)))
+    trace["max_candidate_length_hours"] = int(maxL)
 
     start_h = int(cfg.switch_search_start_hour)
     end_h = int(cfg.switch_search_end_hour)
     candidates = [i for i, h in enumerate(hours) if start_h <= h <= end_h]
     if not candidates:
         candidates = list(range(len(pv)))
+    trace["candidate_start_count"] = len(candidates)
 
     base = _simulate_day(pv, hours, None, 0, cfg, soc_start_pct)
 
@@ -572,6 +602,13 @@ def recommend_switch_window_smart(
         return (3.0 * export) - (4.0 * spill) - penalty_end - penalty_early_full
 
     base_score = score(base)
+    trace["base"] = {
+        "export_kwh": float(base["export_kwh"]),
+        "spill_kwh": float(base["spill_kwh"]),
+        "soc_end_frac": float(base["soc_end_frac"]),
+        "first_full_hour": base.get("first_full_hour", None),
+        "score": float(base_score),
+    }
     best = {"score": base_score, "off": "", "on": "", "L": 0}
 
     for L in range(1, maxL + 1):
@@ -587,9 +624,27 @@ def recommend_switch_window_smart(
                 best = {"score": sc, "off": off_time, "on": on_time, "L": L}
 
     if best["L"] == 0 or (best["score"] - base_score) < 1.0:
-        return ("", "")
+        trace["best"] = {
+            "score": float(best["score"]),
+            "off": str(best["off"]),
+            "on": str(best["on"]),
+            "length_hours": int(best["L"]),
+            "improvement_vs_base": float(best["score"] - base_score),
+        }
+        trace["decision"] = "no_switch"
+        trace["reason"] = "no_meaningful_improvement"
+        return ("", "", trace)
 
-    return (str(best["off"]), str(best["on"]))
+    trace["best"] = {
+        "score": float(best["score"]),
+        "off": str(best["off"]),
+        "on": str(best["on"]),
+        "length_hours": int(best["L"]),
+        "improvement_vs_base": float(best["score"] - base_score),
+    }
+    trace["decision"] = "switch"
+    trace["reason"] = "best_candidate_selected"
+    return (str(best["off"]), str(best["on"]), trace)
 
 
 # ---------------------------
@@ -734,6 +789,14 @@ def upsert_daily_forecast_summary(
     return out_path
 
 
+def save_switch_trace(run_day: date, trace: dict[str, Any]) -> Path:
+    out_dir = Path("forecasts/switch_trace")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"switch_trace_{run_day.isoformat()}.json"
+    out_path.write_text(json.dumps(trace, indent=2, ensure_ascii=False), encoding="utf-8")
+    return out_path
+
+
 def _load_existing_summary(path: Path) -> pd.DataFrame | None:
     if not path.exists():
         return None
@@ -797,7 +860,7 @@ def main() -> None:
     summary_path = Path(args.out_summary)
     existing = _load_existing_summary(summary_path)
 
-    sw_off, sw_on = recommend_switch_window_smart(
+    sw_off, sw_on, sw_trace = recommend_switch_window_smart(
         hourly_df=hourly,
         run_day=today,
         pred_today_kwh=today_kwh,
@@ -805,6 +868,8 @@ def main() -> None:
         summary_existing=existing,
         soc_start_pct=soc_pct,
     )
+    trace_path = save_switch_trace(today, sw_trace)
+    print(f"Switch trace uložena: {trace_path.as_posix()}")
 
     out_path = upsert_daily_forecast_summary(
         run_day=today,
