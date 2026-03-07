@@ -41,7 +41,7 @@ class TestSwitchWindowAvailabilityGate(unittest.TestCase):
 
     def test_returns_empty_when_availability_unavailable(self) -> None:
         with patch.object(pf, "_used_off_hours_from_availability", return_value=None):
-            off, on = pf.recommend_switch_window_smart(
+            off, on, trace = pf.recommend_switch_window_smart(
                 hourly_df=self.hourly,
                 run_day=self.run_day,
                 pred_today_kwh=30.0,
@@ -50,11 +50,12 @@ class TestSwitchWindowAvailabilityGate(unittest.TestCase):
                 soc_start_pct=20.0,
             )
         self.assertEqual((off, on), ("", ""))
+        self.assertEqual(trace.get("reason"), "availability_unavailable")
 
     def test_returns_empty_when_allowance_exhausted(self) -> None:
         # Day 10 with 10% allowance => 10 * 24 * 0.10 = 24h allowance so far.
         with patch.object(pf, "_used_off_hours_from_availability", return_value=24.0):
-            off, on = pf.recommend_switch_window_smart(
+            off, on, trace = pf.recommend_switch_window_smart(
                 hourly_df=self.hourly,
                 run_day=self.run_day,
                 pred_today_kwh=30.0,
@@ -63,11 +64,12 @@ class TestSwitchWindowAvailabilityGate(unittest.TestCase):
                 soc_start_pct=20.0,
             )
         self.assertEqual((off, on), ("", ""))
+        self.assertEqual(trace.get("reason"), "alloc_below_minimum")
 
     def test_can_recommend_window_when_allowance_remains(self) -> None:
         with patch.object(pf, "_used_off_hours_from_availability", return_value=10.0):
             with patch.object(pf, "_simulate_day", side_effect=_sim_base_then_better_off):
-                off, on = pf.recommend_switch_window_smart(
+                off, on, trace = pf.recommend_switch_window_smart(
                     hourly_df=self.hourly,
                     run_day=self.run_day,
                     pred_today_kwh=30.0,
@@ -76,6 +78,7 @@ class TestSwitchWindowAvailabilityGate(unittest.TestCase):
                     soc_start_pct=20.0,
                 )
         self.assertNotEqual((off, on), ("", ""))
+        self.assertEqual(trace.get("decision"), "switch")
 
 
 if __name__ == "__main__":
