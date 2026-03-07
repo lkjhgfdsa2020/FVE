@@ -9,6 +9,7 @@
 
   "export_limit_kw": 3.65,
   "baseload_kw": 0.50,
+  "monthly_off_allowance_frac": 0.10,
   "max_off_hours": 4,
 
   "performance_ratio": 0.82,

@@ -77,6 +77,7 @@ class Config:
     target_soc_evening: float = 0.90
     soc_default_pct: float = 20.0
 
+    monthly_off_allowance_frac: float = 0.10
     max_off_hours: float = 10.0
     switch_search_start_hour: int = 8
     switch_search_end_hour: int = 16
@@ -110,6 +111,7 @@ def load_config(path: str = "config.json") -> Config:
         battery_usable_frac=float(j.get("battery_usable_frac", 0.90)),
         target_soc_evening=float(j.get("target_soc_evening", 0.90)),
         soc_default_pct=float(j.get("soc_default_pct", 20.0)),
+        monthly_off_allowance_frac=float(j.get("monthly_off_allowance_frac", 0.10)),
         max_off_hours=float(j.get("max_off_hours", 10.0)),
         switch_search_start_hour=int(j.get("switch_search_start_hour", 8)),
         switch_search_end_hour=int(j.get("switch_search_end_hour", 16)),
@@ -357,9 +359,8 @@ def apply_snow_correction(cfg: Config, df: pd.DataFrame) -> pd.DataFrame:
 # Switch window logic (existing)
 # ---------------------------
 
-def _month_off_budget_hours(year: int, month: int) -> float:
-    days_in_month = calendar.monthrange(year, month)[1]
-    return 0.20 * days_in_month * 24.0
+def _elapsed_month_off_allowance_hours(run_day: date, allowance_frac: float) -> float:
+    return max(0.0, float(allowance_frac)) * float(run_day.day) * 24.0
 
 
 def _parse_hhmm(s: Any) -> dtime | None:
@@ -401,6 +402,26 @@ def _compute_used_off_hours(summary_existing: pd.DataFrame | None, month_key: st
     return float(
         s_month.apply(lambda r: _hours_between_hhmm(r.get("SwitchOff"), r.get("SwitchOn")), axis=1).sum()
     )
+
+
+def _used_off_hours_from_availability(run_day: date) -> float | None:
+    """
+    Estimate used OFF hours from DisponibilitaPripojeni (dataPointPercentage).
+    dataPointPercentage is ON availability for current month so far.
+    """
+    try:
+        from monitor.availability_check import fetch_current_month_availability
+
+        sample = fetch_current_month_availability()
+        if (sample.month_start_local.year, sample.month_start_local.month) != (run_day.year, run_day.month):
+            return None
+
+        on_frac = max(0.0, min(1.0, float(sample.dispon_pripojeni)))
+        off_frac = 1.0 - on_frac
+        elapsed_hours = float(run_day.day) * 24.0
+        return max(0.0, elapsed_hours * off_frac)
+    except Exception:
+        return None
 
 
 def _simulate_day(
@@ -489,12 +510,11 @@ def recommend_switch_window_smart(
 
     year, month = run_day.year, run_day.month
     month_key = f"{year:04d}-{month:02d}"
-    budget = _month_off_budget_hours(year, month)
-    used = _compute_used_off_hours(summary_existing, month_key)
-    remaining_budget = max(0.0, budget - used)
-
-    days_in_month = calendar.monthrange(year, month)[1]
-    remaining_days = max(1, days_in_month - run_day.day + 1)
+    used = _used_off_hours_from_availability(run_day)
+    if used is None:
+        return ("", "")
+    allowance_so_far = _elapsed_month_off_allowance_hours(run_day, cfg.monthly_off_allowance_frac)
+    remaining_allowance_so_far = max(0.0, allowance_so_far - used)
 
     # allocate more budget to higher-than-average days (within month)
     month_mean_pred = None
@@ -517,8 +537,11 @@ def recommend_switch_window_smart(
     else:
         weight = 1.0
 
-    base_alloc = remaining_budget / remaining_days
-    alloc_today = min(float(cfg.max_off_hours), base_alloc * weight, remaining_budget)
+    alloc_today = min(
+        float(cfg.max_off_hours),
+        remaining_allowance_so_far,
+        remaining_allowance_so_far * weight,
+    )
     if alloc_today < 0.75:
         return ("", "")
 
