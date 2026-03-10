@@ -23,6 +23,11 @@ jobs:
       SOLAX_BASE_URL: ${{ secrets.SOLAX_BASE_URL }}
       SOLAX_TOKEN_ID: ${{ secrets.SOLAX_TOKEN_ID }}
       SOLAX_WIFI_SN: ${{ secrets.SOLAX_WIFI_SN }}
+      AVAILABILITY_API_URL: ${{ secrets.AVAILABILITY_API_URL }}
+      AVAILABILITY_COOKIE: ${{ secrets.AVAILABILITY_COOKIE }}
+      AVAILABILITY_CSRF: ${{ secrets.AVAILABILITY_CSRF }}
+      AVAILABILITY_REFERER: ${{ secrets.AVAILABILITY_REFERER }}
+      AVAILABILITY_USER_AGENT: ${{ secrets.AVAILABILITY_USER_AGENT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +57,17 @@ jobs:
           fi
 
           python -u pv_forecast.py
+
+      - name: Upload forecast debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forecast-debug-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            forecasts/switch_trace/
+            forecast_outputs/
+            forecast_plots/
 
       - name: Commit outputs (daily summary + intraday)
         shell: bash
