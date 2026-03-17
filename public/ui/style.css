@@ -97,6 +97,14 @@ input {
   font-size: 0.92rem;
 }
 
+.heroBadgePrimary {
+  background: linear-gradient(135deg, #fff0bf 0%, #ffd37a 100%);
+  border-color: #efb24e;
+  color: #8a4700;
+  font-weight: 800;
+  box-shadow: 0 10px 22px rgba(239, 178, 78, 0.24);
+}
+
 h2 {
   margin: 0;
   font-size: 1.4rem;
@@ -327,7 +335,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .actions {
-  margin-top: -10px;
+  margin-top: -60px;
   justify-content: flex-start;
   flex-wrap: wrap;
 }
