@@ -64,10 +64,7 @@ input {
 }
 
 .hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.18fr) minmax(240px, 0.82fr);
-  gap: 24px;
-  align-items: center;
+  display: block;
   background:
     radial-gradient(circle at top right, rgba(250, 197, 107, 0.18), transparent 26%),
     linear-gradient(135deg, #fffcf7 0%, #f6f0e8 62%, #eef4fb 100%);
@@ -84,18 +81,18 @@ input {
 
 .heroCopy h1 {
   margin: 0;
-  max-width: 14ch;
-  font-size: clamp(2.2rem, 4.8vw, 4.25rem);
-  line-height: 0.96;
-  letter-spacing: -0.04em;
+  max-width: 18ch;
+  font-size: clamp(1.9rem, 4vw, 3rem);
+  line-height: 1.02;
+  letter-spacing: -0.03em;
 }
 
 .heroCopy p {
-  margin: 16px 0 0;
+  margin: 12px 0 0;
   max-width: 54ch;
   color: #374151;
-  font-size: 1.05rem;
-  line-height: 1.6;
+  font-size: 0.98rem;
+  line-height: 1.55;
 }
 
 .heroMeta {
@@ -291,6 +288,10 @@ input[type="range"]::-moz-range-thumb {
   align-content: center;
   gap: 18px;
   padding: 28px;
+}
+
+.mapFallback[hidden] {
+  display: none;
 }
 
 .mapFallbackCopy strong {
@@ -526,7 +527,6 @@ button:disabled {
 }
 
 @media (max-width: 980px) {
-  .hero,
   .grid,
   .orientationRow {
     grid-template-columns: 1fr;
