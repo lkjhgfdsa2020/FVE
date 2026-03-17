@@ -63,10 +63,15 @@ input {
   box-shadow: var(--shadow);
 }
 
+.paramsCard {
+  display: grid;
+  align-content: start;
+}
+
 .hero {
   display: block;
   padding: 18px 24px;
-  margin-bottom: 8px;
+  margin-bottom: 18px;
   background:
     radial-gradient(circle at top right, rgba(250, 197, 107, 0.18), transparent 26%),
     linear-gradient(135deg, #fffcf7 0%, #f6f0e8 62%, #eef4fb 100%);
@@ -123,7 +128,8 @@ label {
   font-weight: 600;
 }
 
-input[type="number"] {
+input[type="number"],
+input[type="text"] {
   width: 100%;
   min-height: 52px;
   padding: 12px 14px;
@@ -136,6 +142,7 @@ input[type="number"] {
 }
 
 input[type="number"]:focus,
+input[type="text"]:focus,
 input[type="range"]:focus {
   border-color: rgba(217, 119, 6, 0.45);
   box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.12);
@@ -320,7 +327,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .actions {
-  margin-top: 20px;
+  margin-top: -10px;
   justify-content: flex-start;
   flex-wrap: wrap;
 }
