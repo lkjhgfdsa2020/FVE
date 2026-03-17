@@ -65,7 +65,8 @@ input {
 
 .hero {
   display: block;
-  padding: 14px 24px;
+  padding: 18px 24px;
+  margin-bottom: 8px;
   background:
     radial-gradient(circle at top right, rgba(250, 197, 107, 0.18), transparent 26%),
     linear-gradient(135deg, #fffcf7 0%, #f6f0e8 62%, #eef4fb 100%);
