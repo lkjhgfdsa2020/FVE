@@ -4,73 +4,176 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>PV Forecast Calculator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  >
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-  <div class="grid">
-    <div class="card">
-      <h2>PV Forecast Calculator (dnes)</h2>
-      <div class="muted">Timezone: Europe/Prague • PR: 0.82 • Zdroj počasí: Open-Meteo</div>
+  <div class="pageShell">
+    <div class="hero card">
+      <div class="heroCopy">
+        <div class="eyebrow">PV Forecast Calculator</div>
+        <h1>Rychlé nastavení fotovoltaiky bez hledání GPS souřadnic</h1>
+        <p>
+          Vyberte místo přímo na mapě, nastavte sklon a azimut pomocí vizuální pomůcky
+          a hned uvidíte odhad dnešní výroby.
+        </p>
+        <div class="heroMeta">
+          <span>Timezone: Europe/Prague</span>
+          <span>PR: 0.82</span>
+          <span>Zdroj počasí: Open-Meteo</span>
+        </div>
+      </div>
+      <div class="sunScene" aria-hidden="true">
+        <div class="sun"></div>
+        <div class="roof roofLeft"></div>
+        <div class="roof roofRight"></div>
+        <div class="panel panelMain"></div>
+        <div class="panel panelAccent"></div>
+      </div>
     </div>
 
-    <div class="card">
-      <h2>Parametry</h2>
-      <div class="row">
-        <div>
-          <label for="lat">Latitude</label>
-          <input id="lat" type="number" step="0.0001" placeholder="např. 49.1694">
+    <div class="grid">
+      <div class="stack">
+        <div class="card">
+          <h2>1. Umístění</h2>
+          <p class="sectionLead">Klikněte do mapy nebo přetáhněte marker na přesné místo instalace.</p>
+
+          <div class="mapToolbar">
+            <button id="btnLocate" type="button" class="ghostBtn">Použít moji polohu</button>
+            <div class="muted" id="mapStatus">Mapa je připravena pro výběr polohy.</div>
+          </div>
+
+          <div id="map" class="mapFrame" aria-label="Mapa pro výběr lokality"></div>
+
+          <div class="coordSummary">
+            <div class="coordPill">
+              <span class="coordLabel">Latitude</span>
+              <strong id="latPreview">–</strong>
+            </div>
+            <div class="coordPill">
+              <span class="coordLabel">Longitude</span>
+              <strong id="lonPreview">–</strong>
+            </div>
+          </div>
+
+          <div class="row compactRow">
+            <div>
+              <label for="lat">Latitude</label>
+              <input id="lat" type="number" step="0.0001" placeholder="např. 49.1694">
+            </div>
+            <div>
+              <label for="lon">Longitude</label>
+              <input id="lon" type="number" step="0.0001" placeholder="např. 16.5097">
+            </div>
+          </div>
         </div>
-        <div>
-          <label for="lon">Longitude</label>
-          <input id="lon" type="number" step="0.0001" placeholder="např. 16.5097">
+
+        <div class="card">
+          <h2>2. Parametry elektrárny</h2>
+          <div class="row compactRow">
+            <div>
+              <label for="kwp">Výkon elektrárny (kWp)</label>
+              <input id="kwp" type="number" step="0.1" placeholder="např. 8.2">
+            </div>
+            <div>
+              <label for="tilt">Sklon střechy (°)</label>
+              <input id="tilt" type="number" step="1" placeholder="0–90, např. 25">
+            </div>
+          </div>
+
+          <div class="sliderBlock">
+            <div class="sliderHeader">
+              <label for="tiltRange">Sklon panelů</label>
+              <span id="tiltValue" class="sliderValue">25°</span>
+            </div>
+            <input id="tiltRange" type="range" min="0" max="90" step="1" value="25">
+            <div class="sliderScale">
+              <span>0°</span>
+              <span>45°</span>
+              <span>90°</span>
+            </div>
+          </div>
+
+          <div class="row orientationRow">
+            <div>
+              <div class="sliderHeader">
+                <label for="az">Azimut (° od severu)</label>
+                <span id="azValue" class="sliderValue">200°</span>
+              </div>
+              <input id="az" type="number" step="1" placeholder="0–360, např. 221">
+              <input id="azRange" type="range" min="0" max="359" step="1" value="200">
+              <div class="sliderScale compassScale">
+                <span>0° N</span>
+                <span>90° E</span>
+                <span>180° S</span>
+                <span>270° W</span>
+              </div>
+            </div>
+
+            <div class="azimuthCard">
+              <div class="azimuthGraphic" id="azimuthGraphic">
+                <div class="compassRing">
+                  <span class="north">N</span>
+                  <span class="east">E</span>
+                  <span class="south">S</span>
+                  <span class="west">W</span>
+                  <div class="roofIcon"></div>
+                  <div class="azimuthNeedle" id="azNeedle"></div>
+                </div>
+              </div>
+              <div class="azimuthText">
+                <strong id="azLabel">Jiho-jihozápad</strong>
+                <p>
+                  Šipka ukazuje směr, kterým panely míří. 180° znamená jih,
+                  90° východ a 270° západ.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="btnRun" type="button">Spočítat dnešní výrobu</button>
+            <div class="muted" id="cooldownInfo"></div>
+          </div>
+
+          <div class="error" id="err"></div>
         </div>
       </div>
 
-      <div class="row" style="margin-top:12px;">
-        <div>
-          <label for="kwp">Výkon elektrárny (kWp)</label>
-          <input id="kwp" type="number" step="0.1" placeholder="např. 8.2">
+      <div class="card resultCard">
+        <h2>Výsledek</h2>
+        <div class="kpi">
+          <div class="kpiPanel">
+            <div class="muted">Predikce dnes (kWh)</div>
+            <div class="kpiValue" id="kwhToday">–</div>
+          </div>
+          <div class="kpiPanel">
+            <div class="muted">Poznámka</div>
+            <div id="note" class="muted noteText">–</div>
+          </div>
         </div>
-        <div>
-          <label for="tilt">Sklon střechy (°)</label>
-          <input id="tilt" type="number" step="1" placeholder="0–90, např. 25">
-        </div>
-      </div>
 
-      <div class="row" style="margin-top:12px;">
-        <div>
-          <label for="az">Azimut (° od severu)</label>
-          <input id="az" type="number" step="1" placeholder="0–360, např. 221">
+        <div class="chartWrap">
+          <canvas id="chart"></canvas>
         </div>
-        <div class="actions">
-          <button id="btnRun">Spočítat</button>
-          <div class="muted" id="cooldownInfo"></div>
-        </div>
-      </div>
-
-      <div class="error" id="err" style="margin-top:10px;"></div>
-    </div>
-
-    <div class="card">
-      <h2>Výsledek</h2>
-      <div class="kpi">
-        <div>
-          <div class="muted">Predikce dnes (kWh)</div>
-          <div class="kpiValue" id="kwhToday">–</div>
-        </div>
-        <div>
-          <div class="muted">Poznámka</div>
-          <div id="note" class="muted">–</div>
-        </div>
-      </div>
-
-      <div class="chartWrap">
-        <canvas id="chart"></canvas>
       </div>
     </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
   <script src="./app.js"></script>
 </body>
 </html>
