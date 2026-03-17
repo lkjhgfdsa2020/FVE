@@ -247,6 +247,7 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
         "longitude": cfg.longitude,
         "timezone": cfg.timezone,
         "hourly": ",".join(hourly_vars),
+        "daily": "sunrise,sunset",
         "forecast_days": 2,
         "tilt": cfg.tilt_deg,
         "azimuth": az_open,
@@ -262,6 +263,19 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
     times = pd.to_datetime(j["hourly"]["time"])
     df = pd.DataFrame({"time": times})
     df["date"] = df["time"].dt.date
+
+    daily = j.get("daily", {}) or {}
+    daily_dates = pd.to_datetime(pd.Series(daily.get("time", [])), errors="coerce").dt.date
+    daily_sunrise = pd.to_datetime(pd.Series(daily.get("sunrise", [])), errors="coerce")
+    daily_sunset = pd.to_datetime(pd.Series(daily.get("sunset", [])), errors="coerce")
+    if not daily_dates.empty and len(daily_dates) == len(daily_sunrise) == len(daily_sunset):
+        sun_map = pd.DataFrame(
+            {"date": daily_dates, "sunrise": daily_sunrise, "sunset": daily_sunset}
+        ).dropna(subset=["date"])
+        if not sun_map.empty:
+            sun_map = sun_map.drop_duplicates(subset=["date"], keep="last").set_index("date")
+            df["sunrise"] = df["date"].map(sun_map["sunrise"])
+            df["sunset"] = df["date"].map(sun_map["sunset"])
 
     gti = j["hourly"].get("global_tilted_irradiance", None)
     swr = j["hourly"].get("shortwave_radiation", None)
@@ -583,6 +597,15 @@ def recommend_switch_window_smart(
         candidates = list(range(len(pv)))
     trace["candidate_start_count"] = len(candidates)
 
+    sunset_cutoff = None
+    if "sunset" in today.columns:
+        sunset_values = today["sunset"].dropna()
+        if not sunset_values.empty:
+            sunset_cutoff = pd.Timestamp(sunset_values.iloc[0]) - timedelta(hours=2)
+    trace["latest_switch_on_allowed"] = (
+        None if sunset_cutoff is None else pd.Timestamp(sunset_cutoff).isoformat()
+    )
+
     base = _simulate_day(pv, hours, None, 0, cfg, soc_start_pct)
 
     def score(sim: dict[str, Any]) -> float:
@@ -616,6 +639,10 @@ def recommend_switch_window_smart(
             e_idx = s_idx + L
             if e_idx > len(pv):
                 continue
+            if sunset_cutoff is not None:
+                candidate_on = today.iloc[e_idx - 1]["time"] + timedelta(hours=1)
+                if pd.Timestamp(candidate_on) > pd.Timestamp(sunset_cutoff):
+                    continue
             sim = _simulate_day(pv, hours, s_idx, L, cfg, soc_start_pct)
             sc = score(sim)
             if sc > best["score"]:
