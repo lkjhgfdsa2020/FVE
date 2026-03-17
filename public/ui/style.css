@@ -65,41 +65,17 @@ input {
 
 .hero {
   display: block;
+  padding: 14px 24px;
   background:
     radial-gradient(circle at top right, rgba(250, 197, 107, 0.18), transparent 26%),
     linear-gradient(135deg, #fffcf7 0%, #f6f0e8 62%, #eef4fb 100%);
-}
-
-.eyebrow {
-  margin-bottom: 12px;
-  color: var(--accent-strong);
-  font-size: 0.82rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.heroCopy h1 {
-  margin: 0;
-  max-width: 18ch;
-  font-size: clamp(1.9rem, 4vw, 3rem);
-  line-height: 1.02;
-  letter-spacing: -0.03em;
-}
-
-.heroCopy p {
-  margin: 12px 0 0;
-  max-width: 54ch;
-  color: #374151;
-  font-size: 0.98rem;
-  line-height: 1.55;
 }
 
 .heroMeta {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-top: 18px;
+  margin-top: 0;
 }
 
 .heroMeta span,
@@ -113,70 +89,6 @@ input {
   background: rgba(255, 255, 255, 0.84);
   color: #4b5563;
   font-size: 0.92rem;
-}
-
-.sunScene {
-  position: relative;
-  min-height: 280px;
-  border-radius: calc(var(--radius) - 4px);
-  background:
-    radial-gradient(circle at 68% 24%, rgba(253, 186, 116, 0.6), transparent 15%),
-    linear-gradient(180deg, rgba(255, 248, 230, 0.94), rgba(230, 239, 248, 0.46));
-  overflow: hidden;
-}
-
-.sun {
-  position: absolute;
-  top: 34px;
-  right: 44px;
-  width: 84px;
-  height: 84px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%, #fff7da 0%, #ffd261 44%, #f59e0b 100%);
-  box-shadow: 0 0 0 14px rgba(251, 191, 36, 0.12), 0 0 64px rgba(245, 158, 11, 0.28);
-}
-
-.roof,
-.panel {
-  position: absolute;
-  left: 50%;
-  bottom: 44px;
-  transform-origin: center bottom;
-}
-
-.roof {
-  width: 140px;
-  height: 14px;
-  border-radius: 999px;
-  background: #7c5433;
-}
-
-.roofLeft {
-  transform: translateX(-102%) rotate(22deg);
-}
-
-.roofRight {
-  transform: translateX(2%) rotate(-22deg);
-}
-
-.panel {
-  width: 118px;
-  height: 58px;
-  border-radius: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.55);
-  background:
-    linear-gradient(90deg, transparent 0 24%, rgba(255, 255, 255, 0.14) 24% 26%, transparent 26% 49%, rgba(255, 255, 255, 0.14) 49% 51%, transparent 51% 74%, rgba(255, 255, 255, 0.14) 74% 76%, transparent 76%),
-    linear-gradient(180deg, rgba(167, 216, 255, 0.82) 0 30%, rgba(18, 57, 102, 0.96) 30% 100%);
-}
-
-.panelMain {
-  transform: translateX(-92%) rotate(22deg);
-}
-
-.panelAccent {
-  width: 88px;
-  bottom: 70px;
-  transform: translateX(0%) rotate(-20deg);
 }
 
 h2 {
@@ -284,43 +196,11 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .mapFallback {
-  display: grid;
-  align-content: center;
-  gap: 18px;
-  padding: 28px;
+  display: none;
 }
 
 .mapFallback[hidden] {
   display: none;
-}
-
-.mapFallbackCopy strong {
-  display: block;
-  font-size: 1.1rem;
-  margin-bottom: 10px;
-}
-
-.mapFallbackCopy p {
-  margin: 0;
-  color: var(--muted);
-  line-height: 1.6;
-}
-
-.mapFallbackActions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.coordSummary {
-  margin-top: 14px;
-  flex-wrap: wrap;
-  justify-content: flex-start;
-}
-
-.coordLabel {
-  color: var(--muted);
-  font-size: 0.8rem;
 }
 
 .sliderBlock,
@@ -412,6 +292,12 @@ input[type="range"]::-moz-range-thumb {
   stroke: url(#needleGradient);
   stroke-width: 8;
   stroke-linecap: round;
+}
+
+.needleHead {
+  fill: #ff6a2a;
+  stroke: #ff6a2a;
+  stroke-width: 2;
 }
 
 .needleHub {
@@ -530,14 +416,6 @@ button:disabled {
   .grid,
   .orientationRow {
     grid-template-columns: 1fr;
-  }
-
-  .heroCopy h1 {
-    max-width: none;
-  }
-
-  .sunScene {
-    min-height: 220px;
   }
 
   .kpi {

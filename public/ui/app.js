@@ -19,7 +19,6 @@ const DEFAULTS = {
 let chart = null;
 let map = null;
 let marker = null;
-let suppressCoordinateSync = false;
 
 function $(id) { return document.getElementById(id); }
 
@@ -28,17 +27,6 @@ function setError(msg) { $("err").textContent = msg || ""; }
 function setMapStatus(msg) {
   const el = $("mapStatus");
   if (el) el.textContent = msg || "";
-}
-
-function updateMapLinks(lat, lon) {
-  const latNum = Number(lat);
-  const lonNum = Number(lon);
-  if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return;
-
-  const osm = `https://www.openstreetmap.org/?mlat=${latNum}&mlon=${lonNum}#map=15/${latNum}/${lonNum}`;
-  const google = `https://www.google.com/maps?q=${latNum},${lonNum}`;
-  $("osmLink").href = osm;
-  $("googleLink").href = google;
 }
 
 function setCooldownInfo(msRemaining) {
@@ -80,10 +68,6 @@ function clamp(value, min, max) {
 
 function round2(x) {
   return Math.round(x * 100) / 100;
-}
-
-function formatCoord(value) {
-  return Number.isFinite(value) ? value.toFixed(5) : "–";
 }
 
 function normalizeAzimuth(value) {
@@ -208,11 +192,6 @@ function parseDatePart(timeStr) {
   return timeStr ? String(timeStr).slice(0, 10) : null;
 }
 
-function updateCoordinatePreview(lat, lon) {
-  $("latPreview").textContent = formatCoord(lat);
-  $("lonPreview").textContent = formatCoord(lon);
-}
-
 function updateAzimuthUI() {
   const az = normalizeAzimuth(Number($("az").value));
   $("az").value = String(az);
@@ -237,13 +216,8 @@ function setCoordinates(lat, lon, options = {}) {
 
   if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return;
 
-  suppressCoordinateSync = true;
   $("lat").value = latNum.toFixed(5);
   $("lon").value = lonNum.toFixed(5);
-  suppressCoordinateSync = false;
-
-  updateCoordinatePreview(latNum, lonNum);
-  updateMapLinks(latNum, lonNum);
 
   if (updateMap && marker && map) {
     marker.setLatLng([latNum, lonNum]);
@@ -254,11 +228,8 @@ function setCoordinates(lat, lon, options = {}) {
 }
 
 function syncMapFromInputs() {
-  if (suppressCoordinateSync) return;
   const lat = Number($("lat").value);
   const lon = Number($("lon").value);
-  updateCoordinatePreview(lat, lon);
-  updateMapLinks(lat, lon);
 
   if (marker && map && Number.isFinite(lat) && Number.isFinite(lon)) {
     marker.setLatLng([lat, lon]);
@@ -268,7 +239,6 @@ function syncMapFromInputs() {
 
 function showMapFallback(message) {
   $("map").hidden = true;
-  $("mapFallback").hidden = false;
   if (message) setMapStatus(message);
 }
 
@@ -317,29 +287,6 @@ function initMap() {
     marker = null;
     showMapFallback("Interaktivní mapa je v tomto prostředí nedostupná.");
   }
-}
-
-function requestBrowserLocation() {
-  if (!navigator.geolocation) {
-    setMapStatus("Tento prohlížeč nepodporuje zjištění aktuální polohy.");
-    return;
-  }
-
-  setMapStatus("Zjišťuji aktuální polohu...");
-
-  navigator.geolocation.getCurrentPosition(
-    (position) => {
-      setCoordinates(position.coords.latitude, position.coords.longitude, {
-        updateMap: true,
-        mapStatus: "Aktuální poloha byla načtena z prohlížeče."
-      });
-      if (map) map.setZoom(15);
-    },
-    () => {
-      setMapStatus("Přístup k poloze nebyl povolen nebo se polohu nepodařilo zjistit.");
-    },
-    { enableHighAccuracy: true, timeout: 8000 }
-  );
 }
 
 async function run() {
@@ -404,8 +351,6 @@ function initDefaults() {
   $("tiltRange").value = values.tilt ?? DEFAULTS.tilt;
   $("azRange").value = values.az ?? DEFAULTS.az;
 
-  updateCoordinatePreview(Number($("lat").value), Number($("lon").value));
-  updateMapLinks(Number($("lat").value), Number($("lon").value));
   updateTiltUI();
   updateAzimuthUI();
 }
@@ -433,8 +378,6 @@ function hookEvents() {
       $("btnRun").disabled = false;
     }
   });
-
-  $("btnLocate").addEventListener("click", requestBrowserLocation);
 
   $("tilt").addEventListener("input", updateTiltUI);
   $("tiltRange").addEventListener("input", () => {
