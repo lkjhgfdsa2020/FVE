@@ -30,6 +30,17 @@ function setMapStatus(msg) {
   if (el) el.textContent = msg || "";
 }
 
+function updateMapLinks(lat, lon) {
+  const latNum = Number(lat);
+  const lonNum = Number(lon);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return;
+
+  const osm = `https://www.openstreetmap.org/?mlat=${latNum}&mlon=${lonNum}#map=15/${latNum}/${lonNum}`;
+  const google = `https://www.google.com/maps?q=${latNum},${lonNum}`;
+  $("osmLink").href = osm;
+  $("googleLink").href = google;
+}
+
 function setCooldownInfo(msRemaining) {
   if (!msRemaining || msRemaining <= 0) {
     $("cooldownInfo").textContent = "";
@@ -208,7 +219,8 @@ function updateAzimuthUI() {
   $("azRange").value = String(az);
   $("azValue").textContent = `${az}°`;
   $("azLabel").textContent = azimuthLabel(az);
-  $("azimuthGraphic").style.setProperty("--azimuth", `${az}deg`);
+  const needle = $("azNeedleGroup");
+  if (needle) needle.setAttribute("transform", `rotate(${az} 120 120)`);
 }
 
 function updateTiltUI() {
@@ -231,6 +243,7 @@ function setCoordinates(lat, lon, options = {}) {
   suppressCoordinateSync = false;
 
   updateCoordinatePreview(latNum, lonNum);
+  updateMapLinks(latNum, lonNum);
 
   if (updateMap && marker && map) {
     marker.setLatLng([latNum, lonNum]);
@@ -245,6 +258,7 @@ function syncMapFromInputs() {
   const lat = Number($("lat").value);
   const lon = Number($("lon").value);
   updateCoordinatePreview(lat, lon);
+  updateMapLinks(lat, lon);
 
   if (marker && map && Number.isFinite(lat) && Number.isFinite(lon)) {
     marker.setLatLng([lat, lon]);
@@ -252,43 +266,57 @@ function syncMapFromInputs() {
   }
 }
 
+function showMapFallback(message) {
+  $("map").hidden = true;
+  $("mapFallback").hidden = false;
+  if (message) setMapStatus(message);
+}
+
 function initMap() {
   if (!window.L) {
-    setMapStatus("Mapu se nepodařilo načíst. Souřadnice lze zadat ručně.");
+    showMapFallback("Mapu se nepodařilo načíst. Souřadnice lze zadat ručně nebo otevřít lokaci v nové kartě.");
     return;
   }
 
   const lat = Number($("lat").value) || DEFAULTS.lat;
   const lon = Number($("lon").value) || DEFAULTS.lon;
 
-  map = L.map("map", {
-    zoomControl: true,
-    scrollWheelZoom: true
-  }).setView([lat, lon], 13);
+  try {
+    map = L.map("map", {
+      zoomControl: true,
+      scrollWheelZoom: true
+    }).setView([lat, lon], 13);
 
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-  }).addTo(map);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
 
-  marker = L.marker([lat, lon], { draggable: true }).addTo(map);
+    marker = L.marker([lat, lon], { draggable: true }).addTo(map);
 
-  map.on("click", (event) => {
-    setCoordinates(event.latlng.lat, event.latlng.lng, {
-      updateMap: true,
-      mapStatus: "Poloha byla nastavena kliknutím do mapy."
+    map.on("click", (event) => {
+      setCoordinates(event.latlng.lat, event.latlng.lng, {
+        updateMap: true,
+        mapStatus: "Poloha byla nastavena kliknutím do mapy."
+      });
     });
-  });
 
-  marker.on("dragend", () => {
-    const position = marker.getLatLng();
-    setCoordinates(position.lat, position.lng, {
-      updateMap: false,
-      mapStatus: "Marker byl přesunut na novou polohu."
+    marker.on("dragend", () => {
+      const position = marker.getLatLng();
+      setCoordinates(position.lat, position.lng, {
+        updateMap: false,
+        mapStatus: "Marker byl přesunut na novou polohu."
+      });
     });
-  });
 
-  setTimeout(() => map.invalidateSize(), 0);
+    setTimeout(() => {
+      if (map) map.invalidateSize();
+    }, 0);
+  } catch (error) {
+    map = null;
+    marker = null;
+    showMapFallback("Interaktivní mapa je v tomto prostředí nedostupná.");
+  }
 }
 
 function requestBrowserLocation() {
@@ -377,6 +405,7 @@ function initDefaults() {
   $("azRange").value = values.az ?? DEFAULTS.az;
 
   updateCoordinatePreview(Number($("lat").value), Number($("lon").value));
+  updateMapLinks(Number($("lat").value), Number($("lon").value));
   updateTiltUI();
   updateAzimuthUI();
 }

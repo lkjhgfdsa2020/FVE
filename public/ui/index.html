@@ -4,9 +4,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>PV Forecast Calculator</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet">
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -52,6 +49,19 @@
           </div>
 
           <div id="map" class="mapFrame" aria-label="Mapa pro výběr lokality"></div>
+          <div id="mapFallback" class="mapFallback" hidden>
+            <div class="mapFallbackCopy">
+              <strong>Interaktivní mapa se nenačetla.</strong>
+              <p>
+                V tomto prostředí jsou zřejmě blokované externí mapové skripty.
+                Souřadnice můžete stále načíst z prohlížeče nebo otevřít lokaci v mapě v novém okně.
+              </p>
+            </div>
+            <div class="mapFallbackActions">
+              <a id="osmLink" class="ghostBtn linkBtn" target="_blank" rel="noreferrer">OpenStreetMap</a>
+              <a id="googleLink" class="ghostBtn linkBtn" target="_blank" rel="noreferrer">Google Maps</a>
+            </div>
+          </div>
 
           <div class="coordSummary">
             <div class="coordPill">
@@ -120,14 +130,34 @@
 
             <div class="azimuthCard">
               <div class="azimuthGraphic" id="azimuthGraphic">
-                <div class="compassRing">
-                  <span class="north">N</span>
-                  <span class="east">E</span>
-                  <span class="south">S</span>
-                  <span class="west">W</span>
-                  <div class="roofIcon"></div>
-                  <div class="azimuthNeedle" id="azNeedle"></div>
-                </div>
+                <svg viewBox="0 0 240 240" class="compassSvg" aria-hidden="true">
+                  <defs>
+                    <linearGradient id="needleGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stop-color="#ff6a2a"></stop>
+                      <stop offset="100%" stop-color="#182033"></stop>
+                    </linearGradient>
+                    <linearGradient id="panelGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stop-color="#a6d8ff"></stop>
+                      <stop offset="100%" stop-color="#143966"></stop>
+                    </linearGradient>
+                  </defs>
+                  <circle cx="120" cy="120" r="104" class="compassOuter"></circle>
+                  <circle cx="120" cy="120" r="72" class="compassInner"></circle>
+                  <line x1="120" y1="26" x2="120" y2="214" class="compassAxis"></line>
+                  <line x1="26" y1="120" x2="214" y2="120" class="compassAxis"></line>
+                  <text x="120" y="40" text-anchor="middle" class="compassLabel">N</text>
+                  <text x="200" y="125" text-anchor="middle" class="compassLabel">E</text>
+                  <text x="120" y="206" text-anchor="middle" class="compassLabel">S</text>
+                  <text x="40" y="125" text-anchor="middle" class="compassLabel">W</text>
+                  <g transform="translate(120 120) rotate(45)">
+                    <rect x="-24" y="-24" width="48" height="48" rx="14" class="roofPlate"></rect>
+                    <rect x="-12" y="-12" width="24" height="24" rx="8" class="roofPanel"></rect>
+                  </g>
+                  <g id="azNeedleGroup" transform="rotate(200 120 120)">
+                    <line x1="120" y1="120" x2="120" y2="42" class="needleLine"></line>
+                    <circle cx="120" cy="120" r="10" class="needleHub"></circle>
+                  </g>
+                </svg>
               </div>
               <div class="azimuthText">
                 <strong id="azLabel">Jiho-jihozápad</strong>
