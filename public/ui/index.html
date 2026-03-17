@@ -148,13 +148,23 @@
             <div class="kpiValue" id="kwhToday">–</div>
           </div>
           <div class="kpiPanel">
-            <div class="muted">Poznámka</div>
-            <div id="note" class="muted noteText">–</div>
+            <div class="muted">Predikce zítra (kWh)</div>
+            <div class="kpiValue" id="kwhTomorrow">–</div>
           </div>
         </div>
 
-        <div class="chartWrap">
-          <canvas id="chart"></canvas>
+        <div class="chartSection">
+          <div class="chartTitle">Dnes</div>
+          <div class="chartWrap">
+            <canvas id="chartToday"></canvas>
+          </div>
+        </div>
+
+        <div class="chartSection">
+          <div class="chartTitle">Zítra</div>
+          <div class="chartWrap">
+            <canvas id="chartTomorrow"></canvas>
+          </div>
         </div>
       </div>
     </div>

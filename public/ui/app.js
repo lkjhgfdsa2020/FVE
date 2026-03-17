@@ -16,7 +16,8 @@ const DEFAULTS = {
   az: 200
 };
 
-let chart = null;
+let todayChart = null;
+let tomorrowChart = null;
 let map = null;
 let marker = null;
 
@@ -117,7 +118,7 @@ async function fetchOpenMeteoHourly(lat, lon, tiltDeg, azFromNorthDeg) {
 
   url.searchParams.set("tilt", String(tiltDeg));
   url.searchParams.set("azimuth", String(azOpen));
-  url.searchParams.set("forecast_days", "1");
+  url.searchParams.set("forecast_days", "2");
   url.searchParams.set("hourly", "global_tilted_irradiance,shortwave_radiation,cloud_cover");
 
   const r = await fetch(url.toString(), { method: "GET" });
@@ -150,26 +151,23 @@ function pvKwFromIrr(kwp, irr_wm2) {
   return kwp * (irr / 1000.0) * PR;
 }
 
-function renderChart(labels, pvKw) {
-  const ctx = $("chart").getContext("2d");
-  if (chart) {
-    chart.destroy();
-    chart = null;
-  }
+function renderChart(canvasId, existingChart, labels, pvKw, datasetLabel, colors) {
+  const ctx = $(canvasId).getContext("2d");
+  if (existingChart) existingChart.destroy();
 
-  chart = new Chart(ctx, {
+  return new Chart(ctx, {
     type: "line",
     data: {
       labels,
       datasets: [{
-        label: "Predikovaný výkon (kW)",
+        label: datasetLabel,
         data: pvKw,
         tension: 0.35,
         pointRadius: 0,
-        borderColor: "#ff7a18",
+        borderColor: colors.border,
         borderWidth: 3,
         fill: true,
-        backgroundColor: "rgba(255, 122, 24, 0.16)"
+        backgroundColor: colors.fill
       }]
     },
     options: {
@@ -196,6 +194,36 @@ function renderChart(labels, pvKw) {
 
 function parseDatePart(timeStr) {
   return timeStr ? String(timeStr).slice(0, 10) : null;
+}
+
+function addDays(dateStr, dayCount) {
+  const [year, month, day] = String(dateStr).split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + dayCount);
+  return date.toISOString().slice(0, 10);
+}
+
+function buildDaySeries(hourly, targetDate, kwp) {
+  const labels = [];
+  const pvKw = [];
+  let kwhSum = 0;
+
+  for (const r of hourly) {
+    if (parseDatePart(r.time) !== targetDate) continue;
+
+    const hhmm = r.time.slice(11, 16);
+    const kw = pvKwFromIrr(kwp, r.irr_wm2);
+
+    labels.push(hhmm);
+    pvKw.push(round2(kw));
+    kwhSum += kw;
+  }
+
+  return {
+    labels,
+    pvKw,
+    kwh: round2(kwhSum).toFixed(2)
+  };
 }
 
 function updateAzimuthUI() {
@@ -320,26 +348,31 @@ async function run() {
   const hourly = await fetchOpenMeteoHourly(lat, lon, tilt, az);
   const todayDate = parseDatePart(hourly[0]?.time);
   if (!todayDate) throw new Error("Nelze určit dnešní datum z Open-Meteo.");
+  const tomorrowDate = addDays(todayDate, 1);
 
-  const labels = [];
-  const pvKw = [];
-  let kwhSum = 0;
+  const todaySeries = buildDaySeries(hourly, todayDate, kwp);
+  const tomorrowSeries = buildDaySeries(hourly, tomorrowDate, kwp);
 
-  for (const r of hourly) {
-    if (parseDatePart(r.time) !== todayDate) continue;
+  $("kwhToday").textContent = todaySeries.kwh;
+  $("kwhTomorrow").textContent = tomorrowSeries.kwh;
 
-    const hhmm = r.time.slice(11, 16);
-    const kw = pvKwFromIrr(kwp, r.irr_wm2);
+  todayChart = renderChart(
+    "chartToday",
+    todayChart,
+    todaySeries.labels,
+    todaySeries.pvKw,
+    "Predikovaný výkon dnes (kW)",
+    { border: "#ff7a18", fill: "rgba(255, 122, 24, 0.16)" }
+  );
 
-    labels.push(hhmm);
-    pvKw.push(round2(kw));
-    kwhSum += kw;
-  }
-
-  $("kwhToday").textContent = round2(kwhSum).toFixed(2);
-  $("note").textContent = `Datum: ${todayDate} • Zdroj ozáření: ${hourly[0]?.irr_source || "?"} • PR=${PR}`;
-
-  renderChart(labels, pvKw);
+  tomorrowChart = renderChart(
+    "chartTomorrow",
+    tomorrowChart,
+    tomorrowSeries.labels,
+    tomorrowSeries.pvKw,
+    "Predikovaný výkon zítra (kW)",
+    { border: "#d97706", fill: "rgba(217, 119, 6, 0.14)" }
+  );
 
   setLastRunTs(Date.now());
   setCooldownInfo(THROTTLE_MS);
