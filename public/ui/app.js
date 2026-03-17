@@ -62,6 +62,12 @@ function toNum(x) {
   return Number.isFinite(v) ? v : null;
 }
 
+function parseLocaleNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
+  const normalized = String(value ?? "").trim().replace(",", ".");
+  return Number(normalized);
+}
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
@@ -302,7 +308,7 @@ async function run() {
 
   const lat = Number($("lat").value);
   const lon = Number($("lon").value);
-  const kwp = Number($("kwp").value);
+  const kwp = parseLocaleNumber($("kwp").value);
   const tilt = Number($("tilt").value);
   const az = Number($("az").value);
 
@@ -331,7 +337,7 @@ async function run() {
   }
 
   $("kwhToday").textContent = round2(kwhSum).toFixed(2);
-  $("note").textContent = `Datum: ${todayDate} • Irr source: ${hourly[0]?.irr_source || "?"} • PR=${PR}`;
+  $("note").textContent = `Datum: ${todayDate} • Zdroj ozáření: ${hourly[0]?.irr_source || "?"} • PR=${PR}`;
 
   renderChart(labels, pvKw);
 
