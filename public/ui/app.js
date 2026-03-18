@@ -9,6 +9,8 @@ const TZ = "Europe/Prague";
 const PR = 0.82;
 const THROTTLE_MS = 30_000;
 const LANG_STORAGE_KEY = "pv_calc_lang";
+const COOKIE_CONSENT_KEY = "pv_cookie_consent";
+const GA_MEASUREMENT_ID = "G-CS8YDWNBV1";
 const DEFAULTS = {
   lat: 49.19483604326329,
   lon: 16.60870320672247,
@@ -47,6 +49,11 @@ const TRANSLATIONS = {
     tomorrowPrediction: "Predikce zítra (kWh)",
     todayChartTitle: "Dnes",
     tomorrowChartTitle: "Zítra",
+    cookieTitle: "Cookies a analytika",
+    cookieText: "Tento web používá pouze nezbytné úložiště pro zapamatování vašeho nastavení a volitelně analytické cookies Google Analytics pro anonymní statistiky návštěvnosti. Analytika se načte až po vašem souhlasu.",
+    cookieAccept: "Povolit analytiku",
+    cookieReject: "Pouze nezbytné",
+    cookieSettingsButton: "Nastavení cookies",
     cooldown: "Další výpočet za {seconds}s",
     mapClickSet: "Poloha byla nastavena kliknutím do mapy.",
     mapDragSet: "Marker byl přesunut na novou polohu.",
@@ -111,6 +118,11 @@ const TRANSLATIONS = {
     tomorrowPrediction: "Tomorrow's forecast (kWh)",
     todayChartTitle: "Today",
     tomorrowChartTitle: "Tomorrow",
+    cookieTitle: "Cookies and analytics",
+    cookieText: "This site uses only essential storage to remember your settings and, optionally, Google Analytics cookies for anonymous traffic statistics. Analytics is loaded only after you give consent.",
+    cookieAccept: "Allow analytics",
+    cookieReject: "Essential only",
+    cookieSettingsButton: "Cookie settings",
     cooldown: "Next calculation in {seconds}s",
     mapClickSet: "Location was set by clicking on the map.",
     mapDragSet: "The marker was moved to a new location.",
@@ -155,10 +167,54 @@ let currentLang = "cs";
 let currentMapStatusKey = "mapHelp";
 let lastTodaySeries = null;
 let lastTomorrowSeries = null;
+let analyticsLoaded = false;
 
 function $(id) { return document.getElementById(id); }
 
 function setError(msg) { $("err").textContent = msg || ""; }
+
+function getCookieConsent() {
+  return localStorage.getItem(COOKIE_CONSENT_KEY);
+}
+
+function setCookieConsent(value) {
+  localStorage.setItem(COOKIE_CONSENT_KEY, value);
+}
+
+function loadAnalytics() {
+  if (analyticsLoaded) return;
+  analyticsLoaded = true;
+  window.dataLayer = window.dataLayer || [];
+  window.gtag = function gtag() { window.dataLayer.push(arguments); };
+  window.gtag("js", new Date());
+  window.gtag("config", GA_MEASUREMENT_ID);
+
+  const script = document.createElement("script");
+  script.async = true;
+  script.src = `https://www.googletagmanager.com/gtag/js?id=${GA_MEASUREMENT_ID}`;
+  document.head.appendChild(script);
+}
+
+function updateCookieUi() {
+  const consent = getCookieConsent();
+  $("cookieBanner").hidden = consent === "accepted" || consent === "rejected";
+  $("cookieSettingsBtn").hidden = false;
+}
+
+function openCookieBanner() {
+  $("cookieBanner").hidden = false;
+}
+
+function closeCookieBanner() {
+  $("cookieBanner").hidden = true;
+}
+
+function applyCookieConsent(consent) {
+  setCookieConsent(consent);
+  if (consent === "accepted") loadAnalytics();
+  closeCookieBanner();
+  updateCookieUi();
+}
 
 function t(key, vars = {}) {
   const dict = TRANSLATIONS[currentLang] || TRANSLATIONS.cs;
@@ -569,6 +625,8 @@ function initDefaults() {
   $("azRange").value = values.az ?? DEFAULTS.az;
 
   applyTranslations();
+  updateCookieUi();
+  if (getCookieConsent() === "accepted") loadAnalytics();
 }
 
 function saveDefaults() {
@@ -585,6 +643,9 @@ function saveDefaults() {
 function hookEvents() {
   $("langCs").addEventListener("click", () => setLanguage("cs"));
   $("langEn").addEventListener("click", () => setLanguage("en"));
+  $("cookieAccept").addEventListener("click", () => applyCookieConsent("accepted"));
+  $("cookieReject").addEventListener("click", () => applyCookieConsent("rejected"));
+  $("cookieSettingsBtn").addEventListener("click", openCookieBanner);
   $("btnRun").addEventListener("click", async () => {
     try {
       $("btnRun").disabled = true;

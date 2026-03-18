@@ -135,6 +135,65 @@ input {
   box-shadow: 0 10px 22px rgba(239, 178, 78, 0.24);
 }
 
+.cookieSettingsBtn {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 40;
+  min-height: 42px;
+  padding: 10px 14px;
+  border: 1px solid #d8d1c7;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #4b5563;
+  font-weight: 700;
+  box-shadow: 0 10px 24px rgba(35, 32, 27, 0.12);
+}
+
+.cookieBanner {
+  position: fixed;
+  inset: auto 18px 18px 18px;
+  z-index: 50;
+}
+
+.cookieCard {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 20px;
+  border: 1px solid #ddd4c8;
+  border-radius: 22px;
+  background: rgba(255, 253, 250, 0.98);
+  box-shadow: 0 18px 40px rgba(35, 32, 27, 0.16);
+}
+
+.cookieText {
+  max-width: 70ch;
+}
+
+.cookieText strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 1rem;
+}
+
+.cookieText p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.cookieActions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cookieBtn {
+  min-width: 160px;
+}
+
 h2 {
   margin: 0;
   font-size: 1.4rem;
@@ -517,6 +576,30 @@ button:disabled {
   .langBtn {
     flex: 1;
     justify-content: center;
+  }
+
+  .cookieBanner {
+    inset: auto 12px 12px 12px;
+  }
+
+  .cookieCard {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cookieActions {
+    flex-direction: column;
+  }
+
+  .cookieBtn,
+  .cookieSettingsBtn {
+    width: 100%;
+  }
+
+  .cookieSettingsBtn {
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
   }
 
   .compassSvg {

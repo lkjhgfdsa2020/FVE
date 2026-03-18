@@ -177,12 +177,29 @@
     </div>
   </div>
 
+  <button id="cookieSettingsBtn" class="cookieSettingsBtn" type="button" data-i18n="cookieSettingsButton" hidden>Nastavení cookies</button>
+
+  <div id="cookieBanner" class="cookieBanner" hidden>
+    <div class="cookieCard">
+      <div class="cookieText">
+        <strong data-i18n="cookieTitle">Cookies a analytika</strong>
+        <p data-i18n="cookieText">
+          Tento web používá pouze nezbytné úložiště pro zapamatování vašeho nastavení a volitelně analytické cookies Google Analytics pro anonymní statistiky návštěvnosti. Analytika se načte až po vašem souhlasu.
+        </p>
+      </div>
+      <div class="cookieActions">
+        <button id="cookieReject" class="ghostBtn cookieBtn" type="button" data-i18n="cookieReject">Pouze nezbytné</button>
+        <button id="cookieAccept" class="cookieBtn" type="button" data-i18n="cookieAccept">Povolit analytiku</button>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script
     src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
     crossorigin=""
   ></script>
-  <script src="./app.js?v=3"></script>
+  <script src="./app.js?v=4"></script>
 </body>
 </html>
