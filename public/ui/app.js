@@ -8,6 +8,7 @@
 const TZ = "Europe/Prague";
 const PR = 0.82;
 const THROTTLE_MS = 30_000;
+const LANG_STORAGE_KEY = "pv_calc_lang";
 const DEFAULTS = {
   lat: 49.19483604326329,
   lon: 16.60870320672247,
@@ -15,19 +16,168 @@ const DEFAULTS = {
   tilt: 25,
   az: 200
 };
+const TRANSLATIONS = {
+  cs: {
+    pageTitle: "FVE predikce výroby",
+    heroTitle: "FVE predikce výroby",
+    timezoneLabel: `Časové pásmo: ${TZ}`,
+    weatherSource: "Zdroj počasí: Open-Meteo",
+    locationTitle: "1. Umístění",
+    mapHelp: "Klikněte do mapy nebo přetáhněte marker na přesné místo instalace.",
+    latLabel: "Zeměpisná šířka",
+    lonLabel: "Zeměpisná délka",
+    latPlaceholder: "např. 49.1694",
+    lonPlaceholder: "např. 16.5097",
+    paramsTitle: "2. Parametry elektrárny",
+    kwpLabel: "Výkon elektrárny (kWp)",
+    kwpPlaceholder: "např. 8,2",
+    tiltLabel: "Sklon střechy (°)",
+    tiltPlaceholder: "0–90, např. 25",
+    panelTiltLabel: "Sklon panelů",
+    azimuthLabel: "Azimut (° od severu)",
+    azPlaceholder: "0–360, např. 221",
+    scaleNorth: "0° N",
+    scaleEast: "90° E",
+    scaleSouth: "180° S",
+    scaleWest: "270° W",
+    azimuthHelp: "Šipka ukazuje směr, kterým panely míří. 180° znamená jih, 90° východ a 270° západ.",
+    runButton: "Spočítat dnešní výrobu",
+    resultTitle: "Výsledek",
+    todayPrediction: "Predikce dnes (kWh)",
+    tomorrowPrediction: "Predikce zítra (kWh)",
+    todayChartTitle: "Dnes",
+    tomorrowChartTitle: "Zítra",
+    cooldown: "Další výpočet za {seconds}s",
+    mapClickSet: "Poloha byla nastavena kliknutím do mapy.",
+    mapDragSet: "Marker byl přesunut na novou polohu.",
+    mapUnavailable: "Mapu se nepodařilo načíst. Souřadnice lze zadat ručně.",
+    mapUnavailableInteractive: "Interaktivní mapa je v tomto prostředí nedostupná.",
+    dateError: "Nelze určit dnešní datum z Open-Meteo.",
+    throttleError: "Z důvodu limitu lze spustit výpočet nejdříve za {seconds}s.",
+    latError: "Latitude musí být v rozsahu -90 až 90.",
+    lonError: "Longitude musí být v rozsahu -180 až 180.",
+    kwpError: "kWp musí být v rozsahu 0 až 100.",
+    tiltError: "Sklon musí být v rozsahu 0 až 90 stupňů.",
+    azError: "Azimut musí být v rozsahu 0 až <360 stupňů (od severu).",
+    chartTodayDataset: "Predikovaný výkon dnes (kW)",
+    chartTomorrowDataset: "Predikovaný výkon zítra (kW)",
+    chartTimeAxis: `Čas (${TZ})`,
+    azimuthDirections: [
+      "Sever",
+      "Severo-severovýchod",
+      "Severovýchod",
+      "Východo-severovýchod",
+      "Východ",
+      "Východo-jihovýchod",
+      "Jihovýchod",
+      "Jiho-jihovýchod",
+      "Jih",
+      "Jiho-jihozápad",
+      "Jihozápad",
+      "Západo-jihozápad",
+      "Západ",
+      "Západo-severozápad",
+      "Severozápad",
+      "Severo-severozápad"
+    ]
+  },
+  en: {
+    pageTitle: "PV Production Forecast",
+    heroTitle: "PV Production Forecast",
+    timezoneLabel: `Time zone: ${TZ}`,
+    weatherSource: "Weather source: Open-Meteo",
+    locationTitle: "1. Location",
+    mapHelp: "Click on the map or drag the marker to the exact installation location.",
+    latLabel: "Latitude",
+    lonLabel: "Longitude",
+    latPlaceholder: "e.g. 49.1694",
+    lonPlaceholder: "e.g. 16.5097",
+    paramsTitle: "2. Plant Parameters",
+    kwpLabel: "Installed capacity (kWp)",
+    kwpPlaceholder: "e.g. 8.2",
+    tiltLabel: "Roof tilt (°)",
+    tiltPlaceholder: "0–90, e.g. 25",
+    panelTiltLabel: "Panel tilt",
+    azimuthLabel: "Azimuth (° from north)",
+    azPlaceholder: "0–360, e.g. 221",
+    scaleNorth: "0° N",
+    scaleEast: "90° E",
+    scaleSouth: "180° S",
+    scaleWest: "270° W",
+    azimuthHelp: "The arrow shows the direction the panels face. 180° means south, 90° east, and 270° west.",
+    runButton: "Calculate today's production",
+    resultTitle: "Results",
+    todayPrediction: "Today's forecast (kWh)",
+    tomorrowPrediction: "Tomorrow's forecast (kWh)",
+    todayChartTitle: "Today",
+    tomorrowChartTitle: "Tomorrow",
+    cooldown: "Next calculation in {seconds}s",
+    mapClickSet: "Location was set by clicking on the map.",
+    mapDragSet: "The marker was moved to a new location.",
+    mapUnavailable: "The map could not be loaded. Coordinates can still be entered manually.",
+    mapUnavailableInteractive: "Interactive map is unavailable in this environment.",
+    dateError: "Unable to determine today's date from Open-Meteo.",
+    throttleError: "Due to the request limit, the next calculation can run in {seconds}s.",
+    latError: "Latitude must be in the range -90 to 90.",
+    lonError: "Longitude must be in the range -180 to 180.",
+    kwpError: "kWp must be in the range 0 to 100.",
+    tiltError: "Tilt must be in the range 0 to 90 degrees.",
+    azError: "Azimuth must be in the range 0 to <360 degrees (from north).",
+    chartTodayDataset: "Predicted power today (kW)",
+    chartTomorrowDataset: "Predicted power tomorrow (kW)",
+    chartTimeAxis: `Time (${TZ})`,
+    azimuthDirections: [
+      "North",
+      "North-northeast",
+      "Northeast",
+      "East-northeast",
+      "East",
+      "East-southeast",
+      "Southeast",
+      "South-southeast",
+      "South",
+      "South-southwest",
+      "Southwest",
+      "West-southwest",
+      "West",
+      "West-northwest",
+      "Northwest",
+      "North-northwest"
+    ]
+  }
+};
 
 let todayChart = null;
 let tomorrowChart = null;
 let map = null;
 let marker = null;
+let currentLang = "cs";
+let currentMapStatusKey = "mapHelp";
+let lastTodaySeries = null;
+let lastTomorrowSeries = null;
 
 function $(id) { return document.getElementById(id); }
 
 function setError(msg) { $("err").textContent = msg || ""; }
 
-function setMapStatus(msg) {
+function t(key, vars = {}) {
+  const dict = TRANSLATIONS[currentLang] || TRANSLATIONS.cs;
+  let text = dict[key] ?? TRANSLATIONS.cs[key] ?? key;
+  for (const [name, value] of Object.entries(vars)) {
+    text = text.replaceAll(`{${name}}`, String(value));
+  }
+  return text;
+}
+
+function setMapStatus(msg, key = null) {
   const el = $("mapStatus");
   if (el) el.textContent = msg || "";
+  if (key) currentMapStatusKey = key;
+}
+
+function setMapStatusKey(key, vars = {}) {
+  currentMapStatusKey = key;
+  setMapStatus(t(key, vars));
 }
 
 function setCooldownInfo(msRemaining) {
@@ -36,7 +186,7 @@ function setCooldownInfo(msRemaining) {
     return;
   }
   const s = Math.ceil(msRemaining / 1000);
-  $("cooldownInfo").textContent = `Další výpočet za ${s}s`;
+  $("cooldownInfo").textContent = t("cooldown", { seconds: s });
 }
 
 function getLastRunTs() {
@@ -50,11 +200,11 @@ function setLastRunTs(ts) {
 
 function validateInputs(lat, lon, kwp, tilt, az) {
   const errs = [];
-  if (!Number.isFinite(lat) || lat < -90 || lat > 90) errs.push("Latitude musí být v rozsahu -90 až 90.");
-  if (!Number.isFinite(lon) || lon < -180 || lon > 180) errs.push("Longitude musí být v rozsahu -180 až 180.");
-  if (!Number.isFinite(kwp) || kwp <= 0 || kwp > 100) errs.push("kWp musí být v rozsahu 0 až 100.");
-  if (!Number.isFinite(tilt) || tilt < 0 || tilt > 90) errs.push("Sklon musí být v rozsahu 0 až 90 stupňů.");
-  if (!Number.isFinite(az) || az < 0 || az >= 360) errs.push("Azimut musí být v rozsahu 0 až <360 stupňů (od severu).");
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90) errs.push(t("latError"));
+  if (!Number.isFinite(lon) || lon < -180 || lon > 180) errs.push(t("lonError"));
+  if (!Number.isFinite(kwp) || kwp <= 0 || kwp > 100) errs.push(t("kwpError"));
+  if (!Number.isFinite(tilt) || tilt < 0 || tilt > 90) errs.push(t("tiltError"));
+  if (!Number.isFinite(az) || az < 0 || az >= 360) errs.push(t("azError"));
   return errs;
 }
 
@@ -83,24 +233,7 @@ function normalizeAzimuth(value) {
 }
 
 function azimuthLabel(az) {
-  const labels = [
-    "Sever",
-    "Severo-severovýchod",
-    "Severovýchod",
-    "Východo-severovýchod",
-    "Východ",
-    "Východo-jihovýchod",
-    "Jihovýchod",
-    "Jiho-jihovýchod",
-    "Jih",
-    "Jiho-jihozápad",
-    "Jihozápad",
-    "Západo-jihozápad",
-    "Západ",
-    "Západo-severozápad",
-    "Severozápad",
-    "Severo-severozápad"
-  ];
+  const labels = t("azimuthDirections");
   return labels[Math.round(normalizeAzimuth(az) / 22.5) % 16];
 }
 
@@ -181,7 +314,7 @@ function renderChart(canvasId, existingChart, labels, pvKw, datasetLabel, colors
           grid: { color: "rgba(21, 31, 52, 0.08)" }
         },
         x: {
-          title: { display: true, text: `Čas (${TZ})` },
+          title: { display: true, text: t("chartTimeAxis") },
           grid: { display: false }
         }
       },
@@ -236,6 +369,46 @@ function updateAzimuthUI() {
   if (needle) needle.setAttribute("transform", `rotate(${az} 120 120)`);
 }
 
+function applyTranslations() {
+  document.documentElement.lang = currentLang;
+  document.title = t("pageTitle");
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    el.textContent = t(el.dataset.i18n);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    el.placeholder = t(el.dataset.i18nPlaceholder);
+  });
+  $("langCs").classList.toggle("active", currentLang === "cs");
+  $("langEn").classList.toggle("active", currentLang === "en");
+  setMapStatusKey(currentMapStatusKey);
+  updateTiltUI();
+  updateAzimuthUI();
+  if (lastTodaySeries && lastTomorrowSeries) {
+    todayChart = renderChart(
+      "chartToday",
+      todayChart,
+      lastTodaySeries.labels,
+      lastTodaySeries.pvKw,
+      t("chartTodayDataset"),
+      { border: "#ff7a18", fill: "rgba(255, 122, 24, 0.16)" }
+    );
+    tomorrowChart = renderChart(
+      "chartTomorrow",
+      tomorrowChart,
+      lastTomorrowSeries.labels,
+      lastTomorrowSeries.pvKw,
+      t("chartTomorrowDataset"),
+      { border: "#d97706", fill: "rgba(217, 119, 6, 0.14)" }
+    );
+  }
+}
+
+function setLanguage(lang) {
+  currentLang = lang === "en" ? "en" : "cs";
+  localStorage.setItem(LANG_STORAGE_KEY, currentLang);
+  applyTranslations();
+}
+
 function updateTiltUI() {
   const tilt = clamp(Number($("tilt").value) || 0, 0, 90);
   $("tilt").value = String(tilt);
@@ -278,7 +451,7 @@ function showMapFallback(message) {
 
 function initMap() {
   if (!window.L) {
-    showMapFallback("Mapu se nepodařilo načíst. Souřadnice lze zadat ručně nebo otevřít lokaci v nové kartě.");
+    showMapFallback(t("mapUnavailable"));
     return;
   }
 
@@ -301,16 +474,18 @@ function initMap() {
     map.on("click", (event) => {
       setCoordinates(event.latlng.lat, event.latlng.lng, {
         updateMap: true,
-        mapStatus: "Poloha byla nastavena kliknutím do mapy."
+        mapStatus: t("mapClickSet")
       });
+      currentMapStatusKey = "mapClickSet";
     });
 
     marker.on("dragend", () => {
       const position = marker.getLatLng();
       setCoordinates(position.lat, position.lng, {
         updateMap: false,
-        mapStatus: "Marker byl přesunut na novou polohu."
+        mapStatus: t("mapDragSet")
       });
+      currentMapStatusKey = "mapDragSet";
     });
 
     setTimeout(() => {
@@ -319,7 +494,7 @@ function initMap() {
   } catch (error) {
     map = null;
     marker = null;
-    showMapFallback("Interaktivní mapa je v tomto prostředí nedostupná.");
+    showMapFallback(t("mapUnavailableInteractive"));
   }
 }
 
@@ -331,7 +506,7 @@ async function run() {
   const remaining = THROTTLE_MS - (now - last);
   if (remaining > 0) {
     setCooldownInfo(remaining);
-    throw new Error(`Z důvodu limitu lze spustit výpočet nejdříve za ${Math.ceil(remaining / 1000)}s.`);
+    throw new Error(t("throttleError", { seconds: Math.ceil(remaining / 1000) }));
   }
 
   const lat = Number($("lat").value);
@@ -347,11 +522,13 @@ async function run() {
 
   const hourly = await fetchOpenMeteoHourly(lat, lon, tilt, az);
   const todayDate = parseDatePart(hourly[0]?.time);
-  if (!todayDate) throw new Error("Nelze určit dnešní datum z Open-Meteo.");
+  if (!todayDate) throw new Error(t("dateError"));
   const tomorrowDate = addDays(todayDate, 1);
 
   const todaySeries = buildDaySeries(hourly, todayDate, kwp);
   const tomorrowSeries = buildDaySeries(hourly, tomorrowDate, kwp);
+  lastTodaySeries = todaySeries;
+  lastTomorrowSeries = tomorrowSeries;
 
   $("kwhToday").textContent = todaySeries.kwh;
   $("kwhTomorrow").textContent = tomorrowSeries.kwh;
@@ -361,7 +538,7 @@ async function run() {
     todayChart,
     todaySeries.labels,
     todaySeries.pvKw,
-    "Predikovaný výkon dnes (kW)",
+    t("chartTodayDataset"),
     { border: "#ff7a18", fill: "rgba(255, 122, 24, 0.16)" }
   );
 
@@ -370,7 +547,7 @@ async function run() {
     tomorrowChart,
     tomorrowSeries.labels,
     tomorrowSeries.pvKw,
-    "Predikovaný výkon zítra (kW)",
+    t("chartTomorrowDataset"),
     { border: "#d97706", fill: "rgba(217, 119, 6, 0.14)" }
   );
 
@@ -379,6 +556,7 @@ async function run() {
 }
 
 function initDefaults() {
+  currentLang = localStorage.getItem(LANG_STORAGE_KEY) || "cs";
   const saved = JSON.parse(localStorage.getItem("pv_calc_defaults") || "null");
   const values = saved || DEFAULTS;
 
@@ -390,8 +568,7 @@ function initDefaults() {
   $("tiltRange").value = values.tilt ?? DEFAULTS.tilt;
   $("azRange").value = values.az ?? DEFAULTS.az;
 
-  updateTiltUI();
-  updateAzimuthUI();
+  applyTranslations();
 }
 
 function saveDefaults() {
@@ -406,6 +583,8 @@ function saveDefaults() {
 }
 
 function hookEvents() {
+  $("langCs").addEventListener("click", () => setLanguage("cs"));
+  $("langEn").addEventListener("click", () => setLanguage("en"));
   $("btnRun").addEventListener("click", async () => {
     try {
       $("btnRun").disabled = true;

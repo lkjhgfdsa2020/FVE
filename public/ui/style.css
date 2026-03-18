@@ -77,11 +77,41 @@ input {
     linear-gradient(135deg, #fffcf7 0%, #f6f0e8 62%, #eef4fb 100%);
 }
 
+.heroTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
 .heroMeta {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 0;
+}
+
+.langSwitcher {
+  display: inline-flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.langBtn {
+  min-height: 42px;
+  padding: 10px 14px;
+  border: 1px solid #e2d4bf;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  color: #6b7280;
+  font-weight: 700;
+  box-shadow: none;
+}
+
+.langBtn.active {
+  background: linear-gradient(135deg, #fff0bf 0%, #ffd37a 100%);
+  border-color: #efb24e;
+  color: #8a4700;
 }
 
 .heroMeta span,
@@ -448,6 +478,11 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .heroTop {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
   .kpi {
     grid-template-columns: 1fr;
   }
@@ -473,6 +508,15 @@ button:disabled {
   .actions {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .langSwitcher {
+    width: 100%;
+  }
+
+  .langBtn {
+    flex: 1;
+    justify-content: center;
   }
 
   .compassSvg {
