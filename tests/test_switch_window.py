@@ -12,7 +12,10 @@ def _hourly_df(run_day: date) -> pd.DataFrame:
     rows = []
     for i in range(24):
         t = start + timedelta(hours=i)
-        rows.append({"time": t, "date": t.date(), "pv_kw_pred": 3.0})
+        pv_kw = 0.5
+        if 10 <= i <= 14:
+            pv_kw = 5.2
+        rows.append({"time": t, "date": t.date(), "pv_kw_pred": pv_kw})
     return pd.DataFrame(rows)
 
 
@@ -79,6 +82,8 @@ class TestSwitchWindowAvailabilityGate(unittest.TestCase):
                 )
         self.assertNotEqual((off, on), ("", ""))
         self.assertEqual(trace.get("decision"), "switch")
+        self.assertGreaterEqual(int(off.split(":")[0]), 10)
+        self.assertLessEqual(int(on.split(":")[0]), 15)
 
 
 if __name__ == "__main__":
