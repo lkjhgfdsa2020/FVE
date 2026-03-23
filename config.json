@@ -18,6 +18,8 @@
   "switch_search_end_hour": 16,
   "min_pred_kwh_for_switch": 20.0,
   "min_peak_kw_for_switch": 4.0,
+  "preferred_switch_start_hour": 10,
+  "preferred_max_off_hours": 4.0,
 
   "performance_ratio": 0.82,
   "pr_calendar_path": "pr_calendar.json",

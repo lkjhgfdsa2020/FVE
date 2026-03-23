@@ -82,6 +82,9 @@ class Config:
     switch_search_start_hour: int = 8
     switch_search_end_hour: int = 16
     min_pred_kwh_for_switch: float = 20.0
+    min_peak_kw_for_switch: float = 4.0
+    preferred_switch_start_hour: int = 10
+    preferred_max_off_hours: float = 4.0
 
     pr_calendar_path: str = "pr_calendar.json"
     config_path: str = "config.json"
@@ -116,6 +119,9 @@ def load_config(path: str = "config.json") -> Config:
         switch_search_start_hour=int(j.get("switch_search_start_hour", 8)),
         switch_search_end_hour=int(j.get("switch_search_end_hour", 16)),
         min_pred_kwh_for_switch=float(j.get("min_pred_kwh_for_switch", 20.0)),
+        min_peak_kw_for_switch=float(j.get("min_peak_kw_for_switch", 4.0)),
+        preferred_switch_start_hour=int(j.get("preferred_switch_start_hour", 10)),
+        preferred_max_off_hours=float(j.get("preferred_max_off_hours", 4.0)),
         pr_calendar_path=str(j.get("pr_calendar_path", "pr_calendar.json")),
         config_path=str(path),
         snow_enabled=bool(j.get("snow_enabled", True)),
@@ -455,6 +461,7 @@ def _simulate_day(
     export_kwh = 0.0
     spill_kwh = 0.0
     first_full_hour: Optional[int] = None
+    soc_at_off_start_frac: Optional[float] = None
 
     off_end_idx = None
     if off_start_idx is not None and off_len > 0:
@@ -463,6 +470,8 @@ def _simulate_day(
     for i, pv in enumerate(pv_kw):
         h = hours[i]
         pv = max(0.0, float(pv))
+        if off_start_idx is not None and i == off_start_idx and soc_at_off_start_frac is None:
+            soc_at_off_start_frac = E / cap
 
         after_load = max(0.0, pv - float(cfg.baseload_kw))
         in_off = False
@@ -498,7 +507,32 @@ def _simulate_day(
         "spill_kwh": spill_kwh,
         "soc_end_frac": E / cap,
         "first_full_hour": first_full_hour,
+        "soc_at_off_start_frac": soc_at_off_start_frac,
     }
+
+
+def _contiguous_runs(indices: list[int]) -> list[tuple[int, int]]:
+    if not indices:
+        return []
+    runs: list[tuple[int, int]] = []
+    start = indices[0]
+    prev = indices[0]
+    for idx in indices[1:]:
+        if idx == prev + 1:
+            prev = idx
+            continue
+        runs.append((start, prev))
+        start = idx
+        prev = idx
+    runs.append((start, prev))
+    return runs
+
+
+def _hour_to_index(hours: list[int], target_hour: int) -> int | None:
+    for i, h in enumerate(hours):
+        if int(h) >= int(target_hour):
+            return i
+    return None
 
 
 def recommend_switch_window_smart(
@@ -514,8 +548,11 @@ def recommend_switch_window_smart(
         "pred_today_kwh": float(pred_today_kwh),
         "soc_start_pct": float(soc_start_pct),
         "min_pred_kwh_for_switch": float(cfg.min_pred_kwh_for_switch),
+        "min_peak_kw_for_switch": float(cfg.min_peak_kw_for_switch),
         "monthly_off_allowance_frac": float(cfg.monthly_off_allowance_frac),
         "max_off_hours": float(cfg.max_off_hours),
+        "preferred_max_off_hours": float(cfg.preferred_max_off_hours),
+        "preferred_switch_start_hour": int(cfg.preferred_switch_start_hour),
         "search_window_hours": [int(cfg.switch_search_start_hour), int(cfg.switch_search_end_hour)],
     }
     if float(pred_today_kwh) < float(cfg.min_pred_kwh_for_switch):
@@ -578,6 +615,7 @@ def recommend_switch_window_smart(
 
     alloc_today = min(
         float(cfg.max_off_hours),
+        float(cfg.preferred_max_off_hours),
         remaining_allowance_so_far,
         remaining_allowance_so_far * weight,
     )
@@ -587,14 +625,51 @@ def recommend_switch_window_smart(
         trace["reason"] = "alloc_below_minimum"
         return ("", "", trace)
 
+    export_trigger_kw = max(
+        float(cfg.export_limit_kw) + float(cfg.baseload_kw),
+        float(cfg.min_peak_kw_for_switch),
+    )
+    over_trigger_idx = [i for i, pv_kw in enumerate(pv) if float(pv_kw) >= export_trigger_kw]
+    over_trigger_runs = _contiguous_runs(over_trigger_idx)
+    trace["export_trigger_kw"] = float(export_trigger_kw)
+    trace["hours_over_trigger"] = [int(hours[i]) for i in over_trigger_idx]
+    trace["over_trigger_runs"] = [[int(hours[s]), int(hours[e])] for s, e in over_trigger_runs]
+    trace["peak_pv_kw"] = float(max(pv) if pv else 0.0)
+    peak_idx = (None if not pv else int(pv.index(max(pv))))
+    peak_hour = (None if peak_idx is None else int(hours[peak_idx]))
+    trace["peak_hour"] = peak_hour
+    if not over_trigger_idx:
+        trace["decision"] = "no_switch"
+        trace["reason"] = "no_hours_over_export_trigger"
+        return ("", "", trace)
+
     maxL = max(1, int(round(alloc_today)))
     trace["max_candidate_length_hours"] = int(maxL)
 
-    start_h = int(cfg.switch_search_start_hour)
+    lead_hours = 0
+    if float(pred_today_kwh) >= 32.0 or float(soc_start_pct) >= 50.0:
+        lead_hours = 1
+    if float(pred_today_kwh) >= 38.0 or float(soc_start_pct) >= 65.0:
+        lead_hours = 2
+    earliest_practical_start_hour = max(int(cfg.switch_search_start_hour), int(cfg.preferred_switch_start_hour) - 1)
+    first_trigger_idx = over_trigger_idx[0]
+    first_candidate_idx = max(0, first_trigger_idx - lead_hours)
+    earliest_practical_idx = _hour_to_index(hours, earliest_practical_start_hour)
+    if earliest_practical_idx is not None:
+        first_candidate_idx = max(first_candidate_idx, earliest_practical_idx)
+
+    start_h = max(int(cfg.switch_search_start_hour), earliest_practical_start_hour)
     end_h = int(cfg.switch_search_end_hour)
-    candidates = [i for i, h in enumerate(hours) if start_h <= h <= end_h]
+    candidates = [
+        i for i in range(first_candidate_idx, len(hours))
+        if start_h <= hours[i] <= end_h and i <= over_trigger_idx[-1]
+    ]
+    trace["lead_hours_before_trigger"] = int(lead_hours)
+    trace["candidate_start_hours"] = [int(hours[i]) for i in candidates]
     if not candidates:
-        candidates = list(range(len(pv)))
+        trace["decision"] = "no_switch"
+        trace["reason"] = "no_candidate_hours_after_filters"
+        return ("", "", trace)
     trace["candidate_start_count"] = len(candidates)
 
     sunset_cutoff = None
@@ -613,31 +688,44 @@ def recommend_switch_window_smart(
         spill = float(sim["spill_kwh"])
         end_frac = float(sim["soc_end_frac"])
         full_hour = sim.get("first_full_hour", None)
+        off_start_frac = sim.get("soc_at_off_start_frac", None)
 
         target = float(cfg.target_soc_evening)
         deficit = max(0.0, target - end_frac)
         penalty_end = 1500.0 * (deficit ** 2)
 
         penalty_early_full = 0.0
-        if full_hour is not None and int(full_hour) < 15:
-            penalty_early_full = 2.5 * float(15 - int(full_hour))
+        if full_hour is not None and peak_hour is not None and int(full_hour) < int(peak_hour):
+            penalty_early_full = 6.0 * float(int(peak_hour) - int(full_hour))
 
-        return (3.0 * export) - (4.0 * spill) - penalty_end - penalty_early_full
+        penalty_low_soc_at_start = 0.0
+        if off_start_frac is not None and peak_hour is not None:
+            if float(off_start_frac) < 0.30:
+                penalty_low_soc_at_start = 8.0 * float(0.30 - float(off_start_frac))
+
+        return (3.5 * export) - (4.0 * spill) - penalty_end - penalty_early_full - penalty_low_soc_at_start
 
     base_score = score(base)
     trace["base"] = {
         "export_kwh": float(base["export_kwh"]),
         "spill_kwh": float(base["spill_kwh"]),
         "soc_end_frac": float(base["soc_end_frac"]),
+        "soc_at_off_start_frac": base.get("soc_at_off_start_frac", None),
         "first_full_hour": base.get("first_full_hour", None),
         "score": float(base_score),
     }
-    best = {"score": base_score, "off": "", "on": "", "L": 0}
+    best = {"score": base_score, "off": "", "on": "", "L": 0, "sim": None}
 
     for L in range(1, maxL + 1):
         for s_idx in candidates:
             e_idx = s_idx + L
             if e_idx > len(pv):
+                continue
+            matches_run = any(
+                (run_start - lead_hours) <= s_idx <= run_end and (e_idx - 1) <= run_end
+                for run_start, run_end in over_trigger_runs
+            )
+            if not matches_run:
                 continue
             if sunset_cutoff is not None:
                 candidate_on = today.iloc[e_idx - 1]["time"] + timedelta(hours=1)
@@ -648,7 +736,7 @@ def recommend_switch_window_smart(
             if sc > best["score"]:
                 off_time = today.iloc[s_idx]["time"].to_pydatetime().strftime("%H:%M")
                 on_time = (today.iloc[e_idx - 1]["time"].to_pydatetime() + timedelta(hours=1)).strftime("%H:%M")
-                best = {"score": sc, "off": off_time, "on": on_time, "L": L}
+                best = {"score": sc, "off": off_time, "on": on_time, "L": L, "sim": sim}
 
     if best["L"] == 0 or (best["score"] - base_score) < 1.0:
         trace["best"] = {
@@ -657,6 +745,10 @@ def recommend_switch_window_smart(
             "on": str(best["on"]),
             "length_hours": int(best["L"]),
             "improvement_vs_base": float(best["score"] - base_score),
+            "soc_at_off_start_frac": (
+                None if best["sim"] is None else best["sim"].get("soc_at_off_start_frac", None)
+            ),
+            "soc_end_frac": None if best["sim"] is None else float(best["sim"]["soc_end_frac"]),
         }
         trace["decision"] = "no_switch"
         trace["reason"] = "no_meaningful_improvement"
@@ -668,6 +760,10 @@ def recommend_switch_window_smart(
         "on": str(best["on"]),
         "length_hours": int(best["L"]),
         "improvement_vs_base": float(best["score"] - base_score),
+        "soc_at_off_start_frac": (
+            None if best["sim"] is None else best["sim"].get("soc_at_off_start_frac", None)
+        ),
+        "soc_end_frac": None if best["sim"] is None else float(best["sim"]["soc_end_frac"]),
     }
     trace["decision"] = "switch"
     trace["reason"] = "best_candidate_selected"
