@@ -77,14 +77,10 @@ class Config:
     target_soc_evening: float = 0.90
     soc_default_pct: float = 20.0
 
-    monthly_off_allowance_frac: float = 0.10
     max_off_hours: float = 10.0
     switch_search_start_hour: int = 8
     switch_search_end_hour: int = 16
     min_pred_kwh_for_switch: float = 20.0
-    min_peak_kw_for_switch: float = 4.0
-    preferred_switch_start_hour: int = 10
-    preferred_max_off_hours: float = 4.0
 
     pr_calendar_path: str = "pr_calendar.json"
     config_path: str = "config.json"
@@ -114,14 +110,10 @@ def load_config(path: str = "config.json") -> Config:
         battery_usable_frac=float(j.get("battery_usable_frac", 0.90)),
         target_soc_evening=float(j.get("target_soc_evening", 0.90)),
         soc_default_pct=float(j.get("soc_default_pct", 20.0)),
-        monthly_off_allowance_frac=float(j.get("monthly_off_allowance_frac", 0.10)),
         max_off_hours=float(j.get("max_off_hours", 10.0)),
         switch_search_start_hour=int(j.get("switch_search_start_hour", 8)),
         switch_search_end_hour=int(j.get("switch_search_end_hour", 16)),
         min_pred_kwh_for_switch=float(j.get("min_pred_kwh_for_switch", 20.0)),
-        min_peak_kw_for_switch=float(j.get("min_peak_kw_for_switch", 4.0)),
-        preferred_switch_start_hour=int(j.get("preferred_switch_start_hour", 10)),
-        preferred_max_off_hours=float(j.get("preferred_max_off_hours", 4.0)),
         pr_calendar_path=str(j.get("pr_calendar_path", "pr_calendar.json")),
         config_path=str(path),
         snow_enabled=bool(j.get("snow_enabled", True)),
@@ -241,22 +233,12 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
         "snow_depth",
     ]
 
-    # NOTE: Open-Meteo's `global_tilted_irradiance` depends on `tilt` + `azimuth` query parameters.
-    # - cfg.azimuth_deg_from_north is degrees clockwise from North (0=N, 90=E, 180=S, 270=W).
-    # - Open-Meteo expects azimuth as degrees from South (0=S, -90=E, +90=W, ±180=N).
-    az_open = cfg.azimuth_deg_from_north - 180.0
-    # wrap to [-180, 180]
-    az_open = ((az_open + 180.0) % 360.0) - 180.0
-
     params = {
         "latitude": cfg.latitude,
         "longitude": cfg.longitude,
         "timezone": cfg.timezone,
         "hourly": ",".join(hourly_vars),
-        "daily": "sunrise,sunset",
         "forecast_days": 2,
-        "tilt": cfg.tilt_deg,
-        "azimuth": az_open,
     }
 
     r = requests.get(url, params=params, timeout=30)
@@ -269,19 +251,6 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
     times = pd.to_datetime(j["hourly"]["time"])
     df = pd.DataFrame({"time": times})
     df["date"] = df["time"].dt.date
-
-    daily = j.get("daily", {}) or {}
-    daily_dates = pd.to_datetime(pd.Series(daily.get("time", [])), errors="coerce").dt.date
-    daily_sunrise = pd.to_datetime(pd.Series(daily.get("sunrise", [])), errors="coerce")
-    daily_sunset = pd.to_datetime(pd.Series(daily.get("sunset", [])), errors="coerce")
-    if not daily_dates.empty and len(daily_dates) == len(daily_sunrise) == len(daily_sunset):
-        sun_map = pd.DataFrame(
-            {"date": daily_dates, "sunrise": daily_sunrise, "sunset": daily_sunset}
-        ).dropna(subset=["date"])
-        if not sun_map.empty:
-            sun_map = sun_map.drop_duplicates(subset=["date"], keep="last").set_index("date")
-            df["sunrise"] = df["date"].map(sun_map["sunrise"])
-            df["sunset"] = df["date"].map(sun_map["sunset"])
 
     gti = j["hourly"].get("global_tilted_irradiance", None)
     swr = j["hourly"].get("shortwave_radiation", None)
@@ -379,8 +348,9 @@ def apply_snow_correction(cfg: Config, df: pd.DataFrame) -> pd.DataFrame:
 # Switch window logic (existing)
 # ---------------------------
 
-def _elapsed_month_off_allowance_hours(run_day: date, allowance_frac: float) -> float:
-    return max(0.0, float(allowance_frac)) * float(run_day.day) * 24.0
+def _month_off_budget_hours(year: int, month: int) -> float:
+    days_in_month = calendar.monthrange(year, month)[1]
+    return 0.20 * days_in_month * 24.0
 
 
 def _parse_hhmm(s: Any) -> dtime | None:
@@ -424,26 +394,6 @@ def _compute_used_off_hours(summary_existing: pd.DataFrame | None, month_key: st
     )
 
 
-def _used_off_hours_from_availability(run_day: date) -> float | None:
-    """
-    Estimate used OFF hours from DisponibilitaPripojeni (dataPointPercentage).
-    dataPointPercentage is ON availability for current month so far.
-    """
-    try:
-        from monitor.availability_check import fetch_current_month_availability
-
-        sample = fetch_current_month_availability()
-        if (sample.month_start_local.year, sample.month_start_local.month) != (run_day.year, run_day.month):
-            return None
-
-        on_frac = max(0.0, min(1.0, float(sample.dispon_pripojeni)))
-        off_frac = 1.0 - on_frac
-        elapsed_hours = float(run_day.day) * 24.0
-        return max(0.0, elapsed_hours * off_frac)
-    except Exception:
-        return None
-
-
 def _simulate_day(
     pv_kw: list[float],
     hours: list[int],
@@ -461,7 +411,6 @@ def _simulate_day(
     export_kwh = 0.0
     spill_kwh = 0.0
     first_full_hour: Optional[int] = None
-    soc_at_off_start_frac: Optional[float] = None
 
     off_end_idx = None
     if off_start_idx is not None and off_len > 0:
@@ -470,8 +419,6 @@ def _simulate_day(
     for i, pv in enumerate(pv_kw):
         h = hours[i]
         pv = max(0.0, float(pv))
-        if off_start_idx is not None and i == off_start_idx and soc_at_off_start_frac is None:
-            soc_at_off_start_frac = E / cap
 
         after_load = max(0.0, pv - float(cfg.baseload_kw))
         in_off = False
@@ -507,32 +454,7 @@ def _simulate_day(
         "spill_kwh": spill_kwh,
         "soc_end_frac": E / cap,
         "first_full_hour": first_full_hour,
-        "soc_at_off_start_frac": soc_at_off_start_frac,
     }
-
-
-def _contiguous_runs(indices: list[int]) -> list[tuple[int, int]]:
-    if not indices:
-        return []
-    runs: list[tuple[int, int]] = []
-    start = indices[0]
-    prev = indices[0]
-    for idx in indices[1:]:
-        if idx == prev + 1:
-            prev = idx
-            continue
-        runs.append((start, prev))
-        start = idx
-        prev = idx
-    runs.append((start, prev))
-    return runs
-
-
-def _hour_to_index(hours: list[int], target_hour: int) -> int | None:
-    for i, h in enumerate(hours):
-        if int(h) >= int(target_hour):
-            return i
-    return None
 
 
 def recommend_switch_window_smart(
@@ -542,52 +464,28 @@ def recommend_switch_window_smart(
     cfg: Config,
     summary_existing: pd.DataFrame | None,
     soc_start_pct: float,
-) -> Tuple[str, str, dict[str, Any]]:
-    trace: dict[str, Any] = {
-        "run_day": run_day.isoformat(),
-        "pred_today_kwh": float(pred_today_kwh),
-        "soc_start_pct": float(soc_start_pct),
-        "min_pred_kwh_for_switch": float(cfg.min_pred_kwh_for_switch),
-        "min_peak_kw_for_switch": float(cfg.min_peak_kw_for_switch),
-        "monthly_off_allowance_frac": float(cfg.monthly_off_allowance_frac),
-        "max_off_hours": float(cfg.max_off_hours),
-        "preferred_max_off_hours": float(cfg.preferred_max_off_hours),
-        "preferred_switch_start_hour": int(cfg.preferred_switch_start_hour),
-        "search_window_hours": [int(cfg.switch_search_start_hour), int(cfg.switch_search_end_hour)],
-    }
+) -> Tuple[str, str]:
     if float(pred_today_kwh) < float(cfg.min_pred_kwh_for_switch):
-        trace["decision"] = "no_switch"
-        trace["reason"] = "pred_today_below_threshold"
-        return ("", "", trace)
+        return ("", "")
 
     today = hourly_df[hourly_df["date"] == run_day].copy()
     if today.empty:
-        trace["decision"] = "no_switch"
-        trace["reason"] = "no_hourly_rows_for_day"
-        return ("", "", trace)
+        return ("", "")
 
     today = today.sort_values("time")
     pv = pd.to_numeric(today["pv_kw_pred"], errors="coerce").fillna(0.0).tolist()
     hours = today["time"].dt.hour.astype(int).tolist()
-    trace["hourly_points"] = len(pv)
     if len(pv) < 8:
-        trace["decision"] = "no_switch"
-        trace["reason"] = "insufficient_hourly_points"
-        return ("", "", trace)
+        return ("", "")
 
     year, month = run_day.year, run_day.month
     month_key = f"{year:04d}-{month:02d}"
-    used = _used_off_hours_from_availability(run_day)
-    if used is None:
-        trace["decision"] = "no_switch"
-        trace["reason"] = "availability_unavailable"
-        return ("", "", trace)
-    allowance_so_far = _elapsed_month_off_allowance_hours(run_day, cfg.monthly_off_allowance_frac)
-    remaining_allowance_so_far = max(0.0, allowance_so_far - used)
-    trace["month_key"] = month_key
-    trace["used_off_hours_so_far"] = float(used)
-    trace["allowance_so_far_hours"] = float(allowance_so_far)
-    trace["remaining_allowance_so_far_hours"] = float(remaining_allowance_so_far)
+    budget = _month_off_budget_hours(year, month)
+    used = _compute_used_off_hours(summary_existing, month_key)
+    remaining_budget = max(0.0, budget - used)
+
+    days_in_month = calendar.monthrange(year, month)[1]
+    remaining_days = max(1, days_in_month - run_day.day + 1)
 
     # allocate more budget to higher-than-average days (within month)
     month_mean_pred = None
@@ -610,76 +508,18 @@ def recommend_switch_window_smart(
     else:
         weight = 1.0
 
-    trace["month_mean_pred_kwh"] = (None if month_mean_pred is None else float(month_mean_pred))
-    trace["weight"] = float(weight)
-
-    alloc_today = min(
-        float(cfg.max_off_hours),
-        float(cfg.preferred_max_off_hours),
-        remaining_allowance_so_far,
-        remaining_allowance_so_far * weight,
-    )
-    trace["alloc_today_hours"] = float(alloc_today)
+    base_alloc = remaining_budget / remaining_days
+    alloc_today = min(float(cfg.max_off_hours), base_alloc * weight, remaining_budget)
     if alloc_today < 0.75:
-        trace["decision"] = "no_switch"
-        trace["reason"] = "alloc_below_minimum"
-        return ("", "", trace)
-
-    export_trigger_kw = max(
-        float(cfg.export_limit_kw) + float(cfg.baseload_kw),
-        float(cfg.min_peak_kw_for_switch),
-    )
-    over_trigger_idx = [i for i, pv_kw in enumerate(pv) if float(pv_kw) >= export_trigger_kw]
-    over_trigger_runs = _contiguous_runs(over_trigger_idx)
-    trace["export_trigger_kw"] = float(export_trigger_kw)
-    trace["hours_over_trigger"] = [int(hours[i]) for i in over_trigger_idx]
-    trace["over_trigger_runs"] = [[int(hours[s]), int(hours[e])] for s, e in over_trigger_runs]
-    trace["peak_pv_kw"] = float(max(pv) if pv else 0.0)
-    peak_idx = (None if not pv else int(pv.index(max(pv))))
-    peak_hour = (None if peak_idx is None else int(hours[peak_idx]))
-    trace["peak_hour"] = peak_hour
-    if not over_trigger_idx:
-        trace["decision"] = "no_switch"
-        trace["reason"] = "no_hours_over_export_trigger"
-        return ("", "", trace)
+        return ("", "")
 
     maxL = max(1, int(round(alloc_today)))
-    trace["max_candidate_length_hours"] = int(maxL)
 
-    lead_hours = 0
-    if float(pred_today_kwh) >= 32.0 or float(soc_start_pct) >= 50.0:
-        lead_hours = 1
-    if float(pred_today_kwh) >= 38.0 or float(soc_start_pct) >= 65.0:
-        lead_hours = 2
-    earliest_practical_start_hour = max(int(cfg.switch_search_start_hour), int(cfg.preferred_switch_start_hour) - 1)
-    first_trigger_idx = over_trigger_idx[0]
-    first_candidate_idx = max(0, first_trigger_idx - lead_hours)
-    earliest_practical_idx = _hour_to_index(hours, earliest_practical_start_hour)
-    if earliest_practical_idx is not None:
-        first_candidate_idx = max(first_candidate_idx, earliest_practical_idx)
-
-    start_h = max(int(cfg.switch_search_start_hour), earliest_practical_start_hour)
+    start_h = int(cfg.switch_search_start_hour)
     end_h = int(cfg.switch_search_end_hour)
-    candidates = [
-        i for i in range(first_candidate_idx, len(hours))
-        if start_h <= hours[i] <= end_h and i <= over_trigger_idx[-1]
-    ]
-    trace["lead_hours_before_trigger"] = int(lead_hours)
-    trace["candidate_start_hours"] = [int(hours[i]) for i in candidates]
+    candidates = [i for i, h in enumerate(hours) if start_h <= h <= end_h]
     if not candidates:
-        trace["decision"] = "no_switch"
-        trace["reason"] = "no_candidate_hours_after_filters"
-        return ("", "", trace)
-    trace["candidate_start_count"] = len(candidates)
-
-    sunset_cutoff = None
-    if "sunset" in today.columns:
-        sunset_values = today["sunset"].dropna()
-        if not sunset_values.empty:
-            sunset_cutoff = pd.Timestamp(sunset_values.iloc[0]) - timedelta(hours=2)
-    trace["latest_switch_on_allowed"] = (
-        None if sunset_cutoff is None else pd.Timestamp(sunset_cutoff).isoformat()
-    )
+        candidates = list(range(len(pv)))
 
     base = _simulate_day(pv, hours, None, 0, cfg, soc_start_pct)
 
@@ -688,86 +528,36 @@ def recommend_switch_window_smart(
         spill = float(sim["spill_kwh"])
         end_frac = float(sim["soc_end_frac"])
         full_hour = sim.get("first_full_hour", None)
-        off_start_frac = sim.get("soc_at_off_start_frac", None)
 
         target = float(cfg.target_soc_evening)
         deficit = max(0.0, target - end_frac)
         penalty_end = 1500.0 * (deficit ** 2)
 
         penalty_early_full = 0.0
-        if full_hour is not None and peak_hour is not None and int(full_hour) < int(peak_hour):
-            penalty_early_full = 6.0 * float(int(peak_hour) - int(full_hour))
+        if full_hour is not None and int(full_hour) < 15:
+            penalty_early_full = 2.5 * float(15 - int(full_hour))
 
-        penalty_low_soc_at_start = 0.0
-        if off_start_frac is not None and peak_hour is not None:
-            if float(off_start_frac) < 0.30:
-                penalty_low_soc_at_start = 8.0 * float(0.30 - float(off_start_frac))
-
-        return (3.5 * export) - (4.0 * spill) - penalty_end - penalty_early_full - penalty_low_soc_at_start
+        return (3.0 * export) - (4.0 * spill) - penalty_end - penalty_early_full
 
     base_score = score(base)
-    trace["base"] = {
-        "export_kwh": float(base["export_kwh"]),
-        "spill_kwh": float(base["spill_kwh"]),
-        "soc_end_frac": float(base["soc_end_frac"]),
-        "soc_at_off_start_frac": base.get("soc_at_off_start_frac", None),
-        "first_full_hour": base.get("first_full_hour", None),
-        "score": float(base_score),
-    }
-    best = {"score": base_score, "off": "", "on": "", "L": 0, "sim": None}
+    best = {"score": base_score, "off": "", "on": "", "L": 0}
 
     for L in range(1, maxL + 1):
         for s_idx in candidates:
             e_idx = s_idx + L
             if e_idx > len(pv):
                 continue
-            matches_run = any(
-                (run_start - lead_hours) <= s_idx <= run_end and (e_idx - 1) <= run_end
-                for run_start, run_end in over_trigger_runs
-            )
-            if not matches_run:
-                continue
-            if sunset_cutoff is not None:
-                candidate_on = today.iloc[e_idx - 1]["time"] + timedelta(hours=1)
-                if pd.Timestamp(candidate_on) > pd.Timestamp(sunset_cutoff):
-                    continue
             sim = _simulate_day(pv, hours, s_idx, L, cfg, soc_start_pct)
             sc = score(sim)
             if sc > best["score"]:
                 off_time = today.iloc[s_idx]["time"].to_pydatetime().strftime("%H:%M")
                 on_time = (today.iloc[e_idx - 1]["time"].to_pydatetime() + timedelta(hours=1)).strftime("%H:%M")
-                best = {"score": sc, "off": off_time, "on": on_time, "L": L, "sim": sim}
+                best = {"score": sc, "off": off_time, "on": on_time, "L": L}
 
     if best["L"] == 0 or (best["score"] - base_score) < 1.0:
-        trace["best"] = {
-            "score": float(best["score"]),
-            "off": str(best["off"]),
-            "on": str(best["on"]),
-            "length_hours": int(best["L"]),
-            "improvement_vs_base": float(best["score"] - base_score),
-            "soc_at_off_start_frac": (
-                None if best["sim"] is None else best["sim"].get("soc_at_off_start_frac", None)
-            ),
-            "soc_end_frac": None if best["sim"] is None else float(best["sim"]["soc_end_frac"]),
-        }
-        trace["decision"] = "no_switch"
-        trace["reason"] = "no_meaningful_improvement"
-        return ("", "", trace)
+        return ("", "")
 
-    trace["best"] = {
-        "score": float(best["score"]),
-        "off": str(best["off"]),
-        "on": str(best["on"]),
-        "length_hours": int(best["L"]),
-        "improvement_vs_base": float(best["score"] - base_score),
-        "soc_at_off_start_frac": (
-            None if best["sim"] is None else best["sim"].get("soc_at_off_start_frac", None)
-        ),
-        "soc_end_frac": None if best["sim"] is None else float(best["sim"]["soc_end_frac"]),
-    }
-    trace["decision"] = "switch"
-    trace["reason"] = "best_candidate_selected"
-    return (str(best["off"]), str(best["on"]), trace)
+    return (str(best["off"]), str(best["on"]))
 
 
 # ---------------------------
@@ -912,14 +702,6 @@ def upsert_daily_forecast_summary(
     return out_path
 
 
-def save_switch_trace(run_day: date, trace: dict[str, Any]) -> Path:
-    out_dir = Path("forecasts/switch_trace")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"switch_trace_{run_day.isoformat()}.json"
-    out_path.write_text(json.dumps(trace, indent=2, ensure_ascii=False), encoding="utf-8")
-    return out_path
-
-
 def _load_existing_summary(path: Path) -> pd.DataFrame | None:
     if not path.exists():
         return None
@@ -983,7 +765,7 @@ def main() -> None:
     summary_path = Path(args.out_summary)
     existing = _load_existing_summary(summary_path)
 
-    sw_off, sw_on, sw_trace = recommend_switch_window_smart(
+    sw_off, sw_on = recommend_switch_window_smart(
         hourly_df=hourly,
         run_day=today,
         pred_today_kwh=today_kwh,
@@ -991,8 +773,6 @@ def main() -> None:
         summary_existing=existing,
         soc_start_pct=soc_pct,
     )
-    trace_path = save_switch_trace(today, sw_trace)
-    print(f"Switch trace uložena: {trace_path.as_posix()}")
 
     out_path = upsert_daily_forecast_summary(
         run_day=today,
