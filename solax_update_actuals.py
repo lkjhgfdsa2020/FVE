@@ -12,6 +12,7 @@ import requests
 
 
 SUMMARY_CSV_DEFAULT = "forecasts/forecast_daily_summary.csv"
+SUMMARY_COLUMNS = ["Date", "PredictionToday", "ActualToday", "PredictionTomorrow", "SwitchOff", "SwitchOn", "Enabled"]
 
 
 @dataclass
@@ -48,12 +49,11 @@ def solax_realtime(cfg: SolaxConfig) -> dict[str, Any]:
 
 
 def ensure_summary_columns(df: pd.DataFrame) -> pd.DataFrame:
-    required = ["Date", "PredictionToday", "ActualToday", "PredictionTomorrow", "SwitchOff", "SwitchOn"]
-    for c in required:
+    for c in SUMMARY_COLUMNS:
         if c not in df.columns:
             df[c] = pd.NA
     df["Date"] = df["Date"].astype(str)
-    return df[required]
+    return df[SUMMARY_COLUMNS]
 
 
 def upsert_actual_today(summary_csv: str, day: date, actual_kwh: float) -> None:
@@ -77,6 +77,7 @@ def upsert_actual_today(summary_csv: str, day: date, actual_kwh: float) -> None:
                 "PredictionTomorrow": pd.NA,
                 "SwitchOff": "",
                 "SwitchOn": "",
+                "Enabled": "",
             }])],
             ignore_index=True,
         )
