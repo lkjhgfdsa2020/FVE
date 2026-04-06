@@ -86,6 +86,10 @@ class Config:
     min_peak_kw_for_switch: float = 4.0
     preferred_switch_start_hour: int = 10
     preferred_max_off_hours: float = 4.0
+    spot_price_enabled: bool = True
+    spot_price_api_url: str = "https://spotovaelektrina.cz/api/v1/price/get-prices-json-qh"
+    spot_price_negative_threshold_czk: float = 0.0
+    spot_price_pv_score_tolerance: float = 2.0
 
     pr_calendar_path: str = "pr_calendar.json"
     config_path: str = "config.json"
@@ -123,6 +127,12 @@ def load_config(path: str = "config.json") -> Config:
         min_peak_kw_for_switch=float(j.get("min_peak_kw_for_switch", 4.0)),
         preferred_switch_start_hour=int(j.get("preferred_switch_start_hour", 10)),
         preferred_max_off_hours=float(j.get("preferred_max_off_hours", 4.0)),
+        spot_price_enabled=bool(j.get("spot_price_enabled", True)),
+        spot_price_api_url=str(
+            j.get("spot_price_api_url", "https://spotovaelektrina.cz/api/v1/price/get-prices-json-qh")
+        ),
+        spot_price_negative_threshold_czk=float(j.get("spot_price_negative_threshold_czk", 0.0)),
+        spot_price_pv_score_tolerance=float(j.get("spot_price_pv_score_tolerance", 2.0)),
         pr_calendar_path=str(j.get("pr_calendar_path", "pr_calendar.json")),
         config_path=str(path),
         snow_enabled=bool(j.get("snow_enabled", True)),
@@ -512,6 +522,75 @@ def _simulate_day(
     }
 
 
+def _simulate_steps(
+    pv_kw: list[float],
+    step_times: list[pd.Timestamp],
+    off_start_idx: int | None,
+    off_len: int,
+    cfg: Config,
+    soc_start_pct: float,
+    step_hours: float,
+) -> dict[str, Any]:
+    cap = float(cfg.battery_kwh_total) * float(cfg.battery_usable_frac)
+    cap = max(0.1, cap)
+    dt_h = max(0.01, float(step_hours))
+
+    soc0 = max(0.0, min(100.0, float(soc_start_pct)))
+    E = (soc0 / 100.0) * cap
+
+    export_kwh = 0.0
+    spill_kwh = 0.0
+    first_full_hour: Optional[int] = None
+    soc_at_off_start_frac: Optional[float] = None
+
+    off_end_idx = None
+    if off_start_idx is not None and off_len > 0:
+        off_end_idx = off_start_idx + off_len
+
+    for i, pv in enumerate(pv_kw):
+        pv = max(0.0, float(pv))
+        if off_start_idx is not None and i == off_start_idx and soc_at_off_start_frac is None:
+            soc_at_off_start_frac = E / cap
+
+        after_load_kw = max(0.0, pv - float(cfg.baseload_kw))
+        in_off = False
+        if off_start_idx is not None and off_end_idx is not None:
+            in_off = (i >= off_start_idx) and (i < off_end_idx)
+
+        batt_rem = max(0.0, cap - E)
+        batt_rem_kw_equiv = batt_rem / dt_h
+
+        if in_off:
+            export_kw = min(float(cfg.export_limit_kw), after_load_kw)
+            rem_kw = max(0.0, after_load_kw - export_kw)
+            charge_kw = min(rem_kw, batt_rem_kw_equiv)
+            spill_kw = max(0.0, rem_kw - charge_kw)
+        else:
+            charge_kw = min(after_load_kw, batt_rem_kw_equiv)
+            rem_kw = max(0.0, after_load_kw - charge_kw)
+            if batt_rem <= 1e-9:
+                export_kw = min(float(cfg.export_limit_kw), after_load_kw)
+                spill_kw = max(0.0, after_load_kw - export_kw)
+            else:
+                export_kw = 0.0
+                spill_kw = rem_kw
+
+        E = min(cap, E + charge_kw * dt_h)
+        export_kwh += export_kw * dt_h
+        spill_kwh += spill_kw * dt_h
+
+        if first_full_hour is None and E >= cap - 1e-6:
+            first_full_hour = int(pd.Timestamp(step_times[i]).hour)
+
+    return {
+        "export_kwh": export_kwh,
+        "spill_kwh": spill_kwh,
+        "soc_end_frac": E / cap,
+        "first_full_hour": first_full_hour,
+        "soc_at_off_start_frac": soc_at_off_start_frac,
+    }
+
+
 def _contiguous_runs(indices: list[int]) -> list[tuple[int, int]]:
     if not indices:
         return []
@@ -536,6 +615,57 @@ def _hour_to_index(hours: list[int], target_hour: int) -> int | None:
     return None
 
 
+def fetch_spot_prices_qh(cfg: Config, run_day: date) -> pd.DataFrame | None:
+    if not bool(cfg.spot_price_enabled):
+        return None
+    if run_day != date.today():
+        return None
+
+    try:
+        resp = requests.get(str(cfg.spot_price_api_url), timeout=8)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+
+    rows = payload.get("hoursToday")
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    parsed: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            hh = int(row.get("hour"))
+            mm = int(row.get("minute", 0))
+            ts = datetime.combine(run_day, dtime(hh, mm))
+            parsed.append({
+                "time": pd.Timestamp(ts),
+                "price_czk": float(row.get("priceCZK")),
+                "price_eur": float(row.get("priceEur")) if row.get("priceEur") is not None else pd.NA,
+                "price_level": row.get("level"),
+                "price_level_num96": row.get("levelNum96"),
+            })
+        except Exception:
+            continue
+
+    if not parsed:
+        return None
+
+    df = pd.DataFrame(parsed).sort_values("time").drop_duplicates(subset=["time"], keep="last")
+    return df.reset_index(drop=True)
+
+
+def _expand_hourly_to_quarter_hour(today: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for _, row in today.iterrows():
+        base_time = pd.Timestamp(row["time"])
+        for minute in (0, 15, 30, 45):
+            item = row.to_dict()
+            item["time"] = base_time + timedelta(minutes=minute)
+            rows.append(item)
+    return pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
+
+
 def recommend_switch_window_smart(
     hourly_df: pd.DataFrame,
     run_day: date,
@@ -555,6 +685,9 @@ def recommend_switch_window_smart(
         "preferred_max_off_hours": float(cfg.preferred_max_off_hours),
         "preferred_switch_start_hour": int(cfg.preferred_switch_start_hour),
         "search_window_hours": [int(cfg.switch_search_start_hour), int(cfg.switch_search_end_hour)],
+        "spot_price_enabled": bool(cfg.spot_price_enabled),
+        "spot_price_negative_threshold_czk": float(cfg.spot_price_negative_threshold_czk),
+        "spot_price_pv_score_tolerance": float(cfg.spot_price_pv_score_tolerance),
     }
     if float(pred_today_kwh) < float(cfg.min_pred_kwh_for_switch):
         trace["decision"] = "no_switch"
@@ -568,9 +701,34 @@ def recommend_switch_window_smart(
         return ("", "", trace)
 
     today = today.sort_values("time")
-    pv = pd.to_numeric(today["pv_kw_pred"], errors="coerce").fillna(0.0).tolist()
-    hours = today["time"].dt.hour.astype(int).tolist()
-    trace["hourly_points"] = len(pv)
+    trace["hourly_points"] = int(len(today))
+    use_price_qh = False
+    steps = today.copy()
+    step_hours = 1.0
+    spot_prices = fetch_spot_prices_qh(cfg, run_day)
+    if spot_prices is not None and not spot_prices.empty:
+        qh = _expand_hourly_to_quarter_hour(today)
+        steps = qh.merge(spot_prices, on="time", how="left")
+        matched_prices = pd.to_numeric(steps.get("price_czk"), errors="coerce").notna().sum()
+        if matched_prices >= max(80, len(steps) - 8):
+            use_price_qh = True
+            step_hours = 0.25
+        else:
+            steps = today.copy()
+
+    trace["switch_resolution_minutes"] = int(round(step_hours * 60.0))
+    trace["spot_price_mode"] = "quarter_hour" if use_price_qh else "disabled_or_unavailable"
+    if use_price_qh:
+        price_series = pd.to_numeric(steps["price_czk"], errors="coerce")
+        trace["spot_price_points"] = int(price_series.notna().sum())
+        trace["spot_price_negative_points"] = int((price_series < float(cfg.spot_price_negative_threshold_czk)).sum())
+        if price_series.notna().any():
+            trace["spot_price_min_czk"] = float(price_series.min())
+            trace["spot_price_avg_czk"] = float(price_series.mean())
+
+    pv = pd.to_numeric(steps["pv_kw_pred"], errors="coerce").fillna(0.0).tolist()
+    step_times = [pd.Timestamp(t) for t in steps["time"].tolist()]
+    hours = [int(ts.hour) for ts in step_times]
     if len(pv) < 8:
         trace["decision"] = "no_switch"
         trace["reason"] = "insufficient_hourly_points"
@@ -644,17 +802,20 @@ def recommend_switch_window_smart(
         trace["reason"] = "no_hours_over_export_trigger"
         return ("", "", trace)
 
-    maxL = max(1, int(round(alloc_today)))
-    trace["max_candidate_length_hours"] = int(maxL)
+    min_candidate_steps = max(1, int(round(1.0 / step_hours)))
+    maxL = max(min_candidate_steps, int(round(float(alloc_today) / step_hours)))
+    trace["min_candidate_length_hours"] = float(min_candidate_steps * step_hours)
+    trace["max_candidate_length_hours"] = float(maxL * step_hours)
 
     lead_hours = 0
     if float(pred_today_kwh) >= 32.0 or float(soc_start_pct) >= 50.0:
         lead_hours = 1
     if float(pred_today_kwh) >= 38.0 or float(soc_start_pct) >= 65.0:
         lead_hours = 2
+    lead_steps = int(round(float(lead_hours) / step_hours))
     earliest_practical_start_hour = max(int(cfg.switch_search_start_hour), int(cfg.preferred_switch_start_hour) - 1)
     first_trigger_idx = over_trigger_idx[0]
-    first_candidate_idx = max(0, first_trigger_idx - lead_hours)
+    first_candidate_idx = max(0, first_trigger_idx - lead_steps)
     earliest_practical_idx = _hour_to_index(hours, earliest_practical_start_hour)
     if earliest_practical_idx is not None:
         first_candidate_idx = max(first_candidate_idx, earliest_practical_idx)
@@ -666,7 +827,7 @@ def recommend_switch_window_smart(
         if start_h <= hours[i] <= end_h and i <= over_trigger_idx[-1]
     ]
     trace["lead_hours_before_trigger"] = int(lead_hours)
-    trace["candidate_start_hours"] = [int(hours[i]) for i in candidates]
+    trace["candidate_start_times"] = [step_times[i].strftime("%H:%M") for i in candidates[:96]]
     if not candidates:
         trace["decision"] = "no_switch"
         trace["reason"] = "no_candidate_hours_after_filters"
@@ -682,7 +843,10 @@ def recommend_switch_window_smart(
         None if sunset_cutoff is None else pd.Timestamp(sunset_cutoff).isoformat()
     )
 
-    base = _simulate_day(pv, hours, None, 0, cfg, soc_start_pct)
+    if use_price_qh:
+        base = _simulate_steps(pv, step_times, None, 0, cfg, soc_start_pct, step_hours)
+    else:
+        base = _simulate_day(pv, hours, None, 0, cfg, soc_start_pct)
 
     def score(sim: dict[str, Any]) -> float:
         export = float(sim["export_kwh"])
@@ -716,40 +880,89 @@ def recommend_switch_window_smart(
         "score": float(base_score),
     }
     best = {"score": base_score, "off": "", "on": "", "L": 0, "sim": None}
+    candidate_records: list[dict[str, Any]] = []
 
-    for L in range(1, maxL + 1):
+    for L in range(min_candidate_steps, maxL + 1):
         for s_idx in candidates:
             e_idx = s_idx + L
             if e_idx > len(pv):
                 continue
             matches_run = any(
-                (run_start - lead_hours) <= s_idx <= run_end and (e_idx - 1) <= run_end
+                (run_start - lead_steps) <= s_idx <= run_end and (e_idx - 1) <= run_end
                 for run_start, run_end in over_trigger_runs
             )
             if not matches_run:
                 continue
             if sunset_cutoff is not None:
-                candidate_on = today.iloc[e_idx - 1]["time"] + timedelta(hours=1)
+                candidate_on = step_times[e_idx - 1] + timedelta(hours=step_hours)
                 if pd.Timestamp(candidate_on) > pd.Timestamp(sunset_cutoff):
                     continue
-            sim = _simulate_day(pv, hours, s_idx, L, cfg, soc_start_pct)
+            if use_price_qh:
+                sim = _simulate_steps(pv, step_times, s_idx, L, cfg, soc_start_pct, step_hours)
+            else:
+                sim = _simulate_day(pv, hours, s_idx, L, cfg, soc_start_pct)
             sc = score(sim)
+            off_time = step_times[s_idx].to_pydatetime().strftime("%H:%M")
+            on_time = (step_times[e_idx - 1].to_pydatetime() + timedelta(hours=step_hours)).strftime("%H:%M")
+            rec = {"score": sc, "off": off_time, "on": on_time, "L": L, "sim": sim, "s_idx": s_idx, "e_idx": e_idx}
+            if use_price_qh and "price_czk" in steps.columns:
+                prices = pd.to_numeric(steps.iloc[s_idx:e_idx]["price_czk"], errors="coerce").dropna()
+                rec["price_avg_czk"] = (None if prices.empty else float(prices.mean()))
+                rec["price_min_czk"] = (None if prices.empty else float(prices.min()))
+                rec["price_negative_points"] = int(
+                    (prices < float(cfg.spot_price_negative_threshold_czk)).sum()
+                )
+            candidate_records.append(rec)
             if sc > best["score"]:
-                off_time = today.iloc[s_idx]["time"].to_pydatetime().strftime("%H:%M")
-                on_time = (today.iloc[e_idx - 1]["time"].to_pydatetime() + timedelta(hours=1)).strftime("%H:%M")
-                best = {"score": sc, "off": off_time, "on": on_time, "L": L, "sim": sim}
+                best = rec
+
+    if use_price_qh and candidate_records:
+        best_pv_score = max(float(rec["score"]) for rec in candidate_records)
+        shortlist = [
+            rec
+            for rec in candidate_records
+            if float(rec["score"]) >= (best_pv_score - float(cfg.spot_price_pv_score_tolerance))
+        ]
+        price_series = pd.to_numeric(steps.get("price_czk"), errors="coerce")
+        negative_available = bool((price_series < float(cfg.spot_price_negative_threshold_czk)).any())
+        trace["price_shortlist_size"] = int(len(shortlist))
+        trace["price_negative_available"] = negative_available
+        if shortlist:
+            if negative_available:
+                shortlist.sort(
+                    key=lambda rec: (
+                        -int(rec.get("price_negative_points", 0)),
+                        float("inf") if rec.get("price_min_czk") is None else float(rec["price_min_czk"]),
+                        float("inf") if rec.get("price_avg_czk") is None else float(rec["price_avg_czk"]),
+                        -float(rec["score"]),
+                        rec["off"],
+                    )
+                )
+            else:
+                shortlist.sort(
+                    key=lambda rec: (
+                        float("inf") if rec.get("price_avg_czk") is None else float(rec["price_avg_czk"]),
+                        float("inf") if rec.get("price_min_czk") is None else float(rec["price_min_czk"]),
+                        -float(rec["score"]),
+                        rec["off"],
+                    )
+                )
+            best = shortlist[0]
 
     if best["L"] == 0 or (best["score"] - base_score) < 1.0:
         trace["best"] = {
             "score": float(best["score"]),
             "off": str(best["off"]),
             "on": str(best["on"]),
-            "length_hours": int(best["L"]),
+            "length_hours": float(best["L"] * step_hours),
             "improvement_vs_base": float(best["score"] - base_score),
             "soc_at_off_start_frac": (
                 None if best["sim"] is None else best["sim"].get("soc_at_off_start_frac", None)
             ),
             "soc_end_frac": None if best["sim"] is None else float(best["sim"]["soc_end_frac"]),
+            "price_avg_czk": best.get("price_avg_czk", None),
+            "price_min_czk": best.get("price_min_czk", None),
+            "price_negative_points": best.get("price_negative_points", None),
         }
         trace["decision"] = "no_switch"
         trace["reason"] = "no_meaningful_improvement"
@@ -759,12 +972,15 @@ def recommend_switch_window_smart(
         "score": float(best["score"]),
         "off": str(best["off"]),
         "on": str(best["on"]),
-        "length_hours": int(best["L"]),
+        "length_hours": float(best["L"] * step_hours),
         "improvement_vs_base": float(best["score"] - base_score),
         "soc_at_off_start_frac": (
             None if best["sim"] is None else best["sim"].get("soc_at_off_start_frac", None)
         ),
         "soc_end_frac": None if best["sim"] is None else float(best["sim"]["soc_end_frac"]),
+        "price_avg_czk": best.get("price_avg_czk", None),
+        "price_min_czk": best.get("price_min_czk", None),
+        "price_negative_points": best.get("price_negative_points", None),
     }
     trace["decision"] = "switch"
     trace["reason"] = "best_candidate_selected"
