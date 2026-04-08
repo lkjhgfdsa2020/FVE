@@ -31,6 +31,7 @@ import calendar
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, time as dtime
 from pathlib import Path
@@ -270,9 +271,54 @@ def fetch_open_meteo_forecast(cfg: Config) -> pd.DataFrame:
         "azimuth": az_open,
     }
 
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    j = r.json()
+    last_err: Exception | None = None
+    last_status: int | None = None
+    last_body: str = ""
+    retry_delays_s = (0.0, 2.0, 5.0)
+
+    for attempt_idx, delay_s in enumerate(retry_delays_s, start=1):
+        if delay_s > 0:
+            time.sleep(delay_s)
+        try:
+            r = requests.get(url, params=params, timeout=30)
+            r.raise_for_status()
+            j = r.json()
+            break
+        except requests.HTTPError as exc:
+            last_err = exc
+            resp = exc.response
+            last_status = resp.status_code if resp is not None else None
+            last_body = (resp.text or "").strip()[:200] if resp is not None else ""
+            should_retry = last_status in {429, 500, 502, 503, 504} and attempt_idx < len(retry_delays_s)
+            status_txt = f"HTTP {last_status}" if last_status is not None else "HTTP error"
+            print(f"Open-Meteo request failed ({status_txt}, attempt {attempt_idx}/{len(retry_delays_s)})")
+            if not should_retry:
+                break
+        except requests.RequestException as exc:
+            last_err = exc
+            last_status = None
+            last_body = ""
+            should_retry = attempt_idx < len(retry_delays_s)
+            print(
+                f"Open-Meteo request failed ({exc.__class__.__name__}, "
+                f"attempt {attempt_idx}/{len(retry_delays_s)})"
+            )
+            if not should_retry:
+                break
+    else:  # pragma: no cover
+        raise AssertionError("retry loop must either break or return")
+
+    if last_err is not None and "j" not in locals():
+        details = []
+        if last_status is not None:
+            details.append(f"status={last_status}")
+        if last_body:
+            details.append(f"body={last_body!r}")
+        detail_suffix = f" ({', '.join(details)})" if details else ""
+        raise RuntimeError(
+            "Open-Meteo forecast request failed after retries. "
+            f"This currently looks like an upstream outage rather than an API schema change{detail_suffix}."
+        ) from last_err
 
     if "hourly" not in j or "time" not in j["hourly"]:
         raise RuntimeError("Open-Meteo response missing hourly time series.")
@@ -433,6 +479,23 @@ def _compute_used_off_hours(summary_existing: pd.DataFrame | None, month_key: st
     return float(
         s_month.apply(lambda r: _hours_between_hhmm(r.get("SwitchOff"), r.get("SwitchOn")), axis=1).sum()
     )
+
+
+def _resolve_used_off_hours(
+    run_day: date,
+    summary_existing: pd.DataFrame | None,
+) -> tuple[float | None, str]:
+    """
+    Prefer live availability-derived OFF hours, but fall back to the summary CSV
+    when telemetry is unavailable. This keeps switching functional in offline /
+    partial environments while still honoring the monthly budget.
+    """
+    used = _used_off_hours_from_availability(run_day)
+    if used is not None:
+        return float(used), "availability"
+
+    month_key = f"{run_day.year:04d}-{run_day.month:02d}"
+    return float(_compute_used_off_hours(summary_existing, month_key)), "summary_csv"
 
 
 def _used_off_hours_from_availability(run_day: date) -> float | None:
@@ -736,14 +799,11 @@ def recommend_switch_window_smart(
 
     year, month = run_day.year, run_day.month
     month_key = f"{year:04d}-{month:02d}"
-    used = _used_off_hours_from_availability(run_day)
-    if used is None:
-        trace["decision"] = "no_switch"
-        trace["reason"] = "availability_unavailable"
-        return ("", "", trace)
+    used, used_source = _resolve_used_off_hours(run_day, summary_existing)
     allowance_so_far = _elapsed_month_off_allowance_hours(run_day, cfg.monthly_off_allowance_frac)
     remaining_allowance_so_far = max(0.0, allowance_so_far - used)
     trace["month_key"] = month_key
+    trace["used_off_hours_source"] = used_source
     trace["used_off_hours_so_far"] = float(used)
     trace["allowance_so_far_hours"] = float(allowance_so_far)
     trace["remaining_allowance_so_far_hours"] = float(remaining_allowance_so_far)
