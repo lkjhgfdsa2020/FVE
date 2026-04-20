@@ -10,7 +10,7 @@ on:
   schedule:
     # GitHub cron is UTC. 07:00 UTC = 08:00 Europe/Prague in winter (CET).
     # In summer (CEST), 06:00 UTC = 08:00 local. We allow ±1h window in the job.
-    - cron: "0 6,7 * * *"
+    - cron: "0 5,6 * * *"
 
 permissions:
   contents: write
