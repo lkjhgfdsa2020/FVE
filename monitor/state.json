@@ -1,9 +1,10 @@
 {
-  "last_level": "WARN",
-  "last_notified_at": 1777575108,
-  "last_month": "2026-04",
+  "last_level": "CRIT",
+  "last_notified_at": 1777588946,
+  "last_month": "2026-05",
   "last_notified_dates_by_level": {
-    "WARN": "2026-04-30"
+    "WARN": "2026-04-30",
+    "CRIT": "2026-05-01"
   },
-  "last_notified_date": "2026-04-30"
+  "last_notified_date": "2026-05-01"
 }
