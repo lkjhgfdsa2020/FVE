@@ -13,7 +13,7 @@ Metrics (fractions 0..1):
 - dataPointPercentage -> DisponibilitaPripojeni
 - controlPercentage   -> DisponibilitaRizeni
 
-Email notify (Gmail app password) on level changes:
+Email notify (Gmail app password) on level changes and once daily while degraded:
 - WARN when either < 92%
 - CRIT when either < 90%
 """
@@ -212,6 +212,28 @@ def classify(sample: AvailabilitySample) -> str:
     return "OK"
 
 
+def _last_notified_local_date(state: Dict[str, Any]) -> Optional[str]:
+    explicit = state.get("last_notified_date")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+
+    last_notified_at = state.get("last_notified_at")
+    if isinstance(last_notified_at, (int, float)):
+        return datetime.fromtimestamp(last_notified_at, tz=PRAGUE_TZ).strftime("%Y-%m-%d")
+    return None
+
+
+def should_notify(state: Dict[str, Any], level: str, now_local: datetime) -> bool:
+    prev_level = state.get("last_level", "OK")
+    if level != prev_level:
+        return True
+
+    if level in ("WARN", "CRIT"):
+        return _last_notified_local_date(state) != now_local.strftime("%Y-%m-%d")
+
+    return False
+
+
 def _send_email(subject: str, body: str) -> None:
     smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
@@ -241,6 +263,7 @@ def _send_email(subject: str, body: str) -> None:
 def main() -> int:
     state = _load_state()
     prev_level = state.get("last_level", "OK")
+    now_local = datetime.now(tz=PRAGUE_TZ)
 
     sample = fetch_current_month_availability()
     level = classify(sample)
@@ -256,17 +279,19 @@ def main() -> int:
         f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
     )
 
-    if level != prev_level:
+    if should_notify(state, level, now_local):
         _send_email(subject, body)
         state["last_level"] = level
         state["last_notified_at"] = int(time.time())
+        state["last_notified_date"] = now_local.strftime("%Y-%m-%d")
         state["last_month"] = sample.month_start_local.strftime("%Y-%m")
         _save_state(state)
     else:
+        state["last_level"] = level
         state["last_month"] = sample.month_start_local.strftime("%Y-%m")
         _save_state(state)
 
-    return 2 if level in ("WARN", "CRIT") else 0
+    return 0
 
 
 if __name__ == "__main__":
