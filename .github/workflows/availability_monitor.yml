@@ -25,11 +25,14 @@ jobs:
           pip install requests
 
       - name: Restore monitor state
-        uses: actions/cache@v4
+        id: cache-monitor-state
+        uses: actions/cache/restore@v4
         with:
           path: monitor/state.json
-          key: availability-monitor-state
-          restore-keys: availability-monitor-state
+          key: availability-monitor-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            availability-monitor-state-
+            availability-monitor-state
 
       - name: Run availability check (email notify)
         env:
@@ -49,8 +52,15 @@ jobs:
           MAIL_TO: ${{ secrets.MAIL_TO }}
 
           # Thresholds / TZ
-          WARN_THRESHOLD_PCT: "93"
+          WARN_THRESHOLD_PCT: "92"
           CRIT_THRESHOLD_PCT: "90"
           LOCAL_TZ: "Europe/Prague"
         run: |
-          python monitor/availability_check.py || true
+          python monitor/availability_check.py
+
+      - name: Save monitor state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: monitor/state.json
+          key: availability-monitor-state-${{ github.run_id }}-${{ github.run_attempt }}

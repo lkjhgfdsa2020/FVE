@@ -1,7 +1,9 @@
 data/solax/
 *.xlsx
 logs/
-monitor/
+monitor/*
+!monitor/
+!monitor/availability_check.py
 forecast_outputs/
 cache/openmeteo/
 config.json
