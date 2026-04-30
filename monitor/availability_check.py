@@ -212,7 +212,16 @@ def classify(sample: AvailabilitySample) -> str:
     return "OK"
 
 
-def _last_notified_local_date(state: Dict[str, Any]) -> Optional[str]:
+def _last_notified_local_date(state: Dict[str, Any], level: str) -> Optional[str]:
+    by_level = state.get("last_notified_dates_by_level")
+    if isinstance(by_level, dict):
+        explicit_for_level = by_level.get(level)
+        if isinstance(explicit_for_level, str) and explicit_for_level:
+            return explicit_for_level
+
+    if state.get("last_level") != level:
+        return None
+
     explicit = state.get("last_notified_date")
     if isinstance(explicit, str) and explicit:
         return explicit
@@ -225,13 +234,26 @@ def _last_notified_local_date(state: Dict[str, Any]) -> Optional[str]:
 
 def should_notify(state: Dict[str, Any], level: str, now_local: datetime) -> bool:
     prev_level = state.get("last_level", "OK")
-    if level != prev_level:
-        return True
+    today = now_local.strftime("%Y-%m-%d")
 
     if level in ("WARN", "CRIT", "ERROR"):
-        return _last_notified_local_date(state) != now_local.strftime("%Y-%m-%d")
+        return _last_notified_local_date(state, level) != today
 
-    return False
+    if level == "OK":
+        return prev_level != "OK" and _last_notified_local_date(state, level) != today
+
+    return level != prev_level
+
+
+def _mark_notified(state: Dict[str, Any], level: str, now_local: datetime) -> None:
+    today = now_local.strftime("%Y-%m-%d")
+    by_level = state.get("last_notified_dates_by_level")
+    if not isinstance(by_level, dict):
+        by_level = {}
+    by_level[level] = today
+    state["last_notified_dates_by_level"] = by_level
+    state["last_notified_at"] = int(time.time())
+    state["last_notified_date"] = today
 
 
 def _format_fetch_error(exc: BaseException) -> str:
@@ -291,8 +313,7 @@ def main() -> int:
 
         if should_notify(state, level, now_local):
             _send_email(subject, body)
-            state["last_notified_at"] = int(time.time())
-            state["last_notified_date"] = now_local.strftime("%Y-%m-%d")
+            _mark_notified(state, level, now_local)
         state["last_level"] = level
         _save_state(state)
         return 1
@@ -313,8 +334,7 @@ def main() -> int:
     if should_notify(state, level, now_local):
         _send_email(subject, body)
         state["last_level"] = level
-        state["last_notified_at"] = int(time.time())
-        state["last_notified_date"] = now_local.strftime("%Y-%m-%d")
+        _mark_notified(state, level, now_local)
         state["last_month"] = sample.month_start_local.strftime("%Y-%m")
         _save_state(state)
     else:
