@@ -228,10 +228,21 @@ def should_notify(state: Dict[str, Any], level: str, now_local: datetime) -> boo
     if level != prev_level:
         return True
 
-    if level in ("WARN", "CRIT"):
+    if level in ("WARN", "CRIT", "ERROR"):
         return _last_notified_local_date(state) != now_local.strftime("%Y-%m-%d")
 
     return False
+
+
+def _format_fetch_error(exc: BaseException) -> str:
+    response = getattr(exc, "response", None)
+    if response is not None:
+        snippet = (getattr(response, "text", "") or "")[:500]
+        status_code = getattr(response, "status_code", "unknown")
+        if snippet:
+            return f"HTTP {status_code} from API.\nBody (first 500 chars):\n{snippet}"
+        return f"HTTP {status_code} from API."
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _send_email(subject: str, body: str) -> None:
@@ -265,7 +276,27 @@ def main() -> int:
     prev_level = state.get("last_level", "OK")
     now_local = datetime.now(tz=PRAGUE_TZ)
 
-    sample = fetch_current_month_availability()
+    try:
+        sample = fetch_current_month_availability()
+    except Exception as exc:
+        level = "ERROR"
+        subject = f"FVE Availability {level} - {now_local.strftime('%Y-%m-%d')}"
+        body = (
+            f"FVE Availability monitor status: {level}\n"
+            f"Previous level: {prev_level}\n"
+            f"Thresholds: WARN<{WARN_THRESHOLD_PCT:.0f}%, CRIT<{CRIT_THRESHOLD_PCT:.0f}%\n"
+            f"{_format_fetch_error(exc)}\n"
+            f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+        )
+
+        if should_notify(state, level, now_local):
+            _send_email(subject, body)
+            state["last_notified_at"] = int(time.time())
+            state["last_notified_date"] = now_local.strftime("%Y-%m-%d")
+        state["last_level"] = level
+        _save_state(state)
+        return 1
+
     level = classify(sample)
 
     subject = f"FVE Availability {level} - {sample.month_start_local.strftime('%Y-%m')}"

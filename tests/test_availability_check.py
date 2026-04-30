@@ -32,6 +32,14 @@ class TestAvailabilityCheck(unittest.TestCase):
 
         self.assertFalse(should_notify(state, "WARN", now))
 
+    def test_should_notify_once_per_local_day_while_monitor_error(self) -> None:
+        now = datetime(2026, 4, 30, 9, 0, tzinfo=PRAGUE)
+        yesterday = {"last_level": "ERROR", "last_notified_date": "2026-04-29"}
+        today = {"last_level": "ERROR", "last_notified_date": "2026-04-30"}
+
+        self.assertTrue(should_notify(yesterday, "ERROR", now))
+        self.assertFalse(should_notify(today, "ERROR", now))
+
 
 if __name__ == "__main__":
     unittest.main()
