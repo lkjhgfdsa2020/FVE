@@ -1190,6 +1190,15 @@ def upsert_daily_forecast_summary(
             if c not in old.columns:
                 old[c] = pd.NA
         old["Date"] = old["Date"].astype(str)
+        existing_row = old[old["Date"] == run_day.isoformat()]
+        if actual_today is None and not existing_row.empty:
+            existing_actual = existing_row.iloc[-1].get("ActualToday", pd.NA)
+            if not pd.isna(existing_actual) and str(existing_actual).strip():
+                new_row.loc[0, "ActualToday"] = existing_actual
+        if not existing_row.empty:
+            existing_enabled = existing_row.iloc[-1].get("Enabled", pd.NA)
+            if not pd.isna(existing_enabled) and str(existing_enabled).strip():
+                new_row.loc[0, "Enabled"] = str(existing_enabled).strip().lower()
         old = old[old["Date"] != run_day.isoformat()]
         merged = pd.concat([old, new_row], ignore_index=True)
     else:
