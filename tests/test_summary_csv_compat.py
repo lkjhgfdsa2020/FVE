@@ -20,9 +20,13 @@ def test_upsert_daily_forecast_summary_adds_enabled_column_for_new_file(tmp_path
 
     df = pd.read_csv(out_csv, keep_default_na=False)
     assert list(df.columns) == pf.SUMMARY_COLUMNS
-    assert df.loc[0, "Enabled"] == ""
-    assert df.loc[0, "SwitchOff"] == "12:00"
-    assert df.loc[0, "SwitchOn"] == "15:00"
+    assert df["Date"].tolist() == ["2026-04-03", "2026-04-04"]
+    previous = df.loc[df["Date"] == "2026-04-03"].iloc[0]
+    assert previous.drop(labels=["Date"]).eq("").all()
+    current = df.loc[df["Date"] == "2026-04-04"].iloc[0]
+    assert current["Enabled"] == ""
+    assert current["SwitchOff"] == "12:00"
+    assert current["SwitchOn"] == "15:00"
 
 
 def test_upsert_daily_forecast_summary_preserves_existing_enabled_value(tmp_path) -> None:
@@ -76,10 +80,40 @@ def test_upsert_daily_forecast_summary_preserves_existing_actual_for_same_day(tm
 
     df = pd.read_csv(out_csv, keep_default_na=False)
     row = df.loc[df["Date"] == "2026-05-11"].iloc[0]
-    assert row["PredictionToday"] == 31.4
-    assert row["ActualToday"] == 25.0
-    assert row["PredictionTomorrow"] == 36.8
+    assert float(row["PredictionToday"]) == 31.4
+    assert float(row["ActualToday"]) == 25.0
+    assert float(row["PredictionTomorrow"]) == 36.8
     assert str(row["Enabled"]).lower() == "false"
+
+
+def test_upsert_daily_forecast_summary_adds_missing_previous_day_only_once(tmp_path) -> None:
+    out_csv = tmp_path / "forecast_daily_summary.csv"
+    out_csv.write_text(
+        "\n".join(
+            [
+                "Date,PredictionToday,ActualToday,PredictionTomorrow,SwitchOff,SwitchOn,Enabled",
+                "2026-05-09,20.0,19.5,21.0,10:00,12:00,false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    for prediction in (31.4, 32.1):
+        pf.upsert_daily_forecast_summary(
+            run_day=date(2026, 5, 11),
+            pred_today=prediction,
+            pred_tomorrow=36.8,
+            switch_off="",
+            switch_on="",
+            out_csv=str(out_csv),
+        )
+
+    df = pd.read_csv(out_csv, keep_default_na=False)
+    assert df["Date"].tolist() == ["2026-05-09", "2026-05-10", "2026-05-11"]
+    previous = df.loc[df["Date"] == "2026-05-10"]
+    assert len(previous) == 1
+    assert previous.iloc[0].drop(labels=["Date"]).eq("").all()
 
 
 def test_ensure_summary_columns_accepts_legacy_and_new_layouts() -> None:

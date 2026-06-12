@@ -1161,6 +1161,13 @@ SUMMARY_COLUMNS = [
 ]
 
 
+def _empty_summary_row(day: date) -> dict[str, Any]:
+    return {
+        column: day.isoformat() if column == "Date" else pd.NA
+        for column in SUMMARY_COLUMNS
+    }
+
+
 def upsert_daily_forecast_summary(
     run_day: date,
     pred_today: float,
@@ -1190,6 +1197,12 @@ def upsert_daily_forecast_summary(
             if c not in old.columns:
                 old[c] = pd.NA
         old["Date"] = old["Date"].astype(str)
+        previous_day = (run_day - timedelta(days=1)).isoformat()
+        if not (old["Date"] == previous_day).any():
+            old = pd.concat(
+                [old, pd.DataFrame([_empty_summary_row(run_day - timedelta(days=1))])],
+                ignore_index=True,
+            )
         existing_row = old[old["Date"] == run_day.isoformat()]
         if actual_today is None and not existing_row.empty:
             existing_actual = existing_row.iloc[-1].get("ActualToday", pd.NA)
@@ -1202,7 +1215,13 @@ def upsert_daily_forecast_summary(
         old = old[old["Date"] != run_day.isoformat()]
         merged = pd.concat([old, new_row], ignore_index=True)
     else:
-        merged = new_row
+        merged = pd.concat(
+            [
+                pd.DataFrame([_empty_summary_row(run_day - timedelta(days=1))]),
+                new_row,
+            ],
+            ignore_index=True,
+        )
 
     merged = merged[SUMMARY_COLUMNS].sort_values("Date")
     merged.to_csv(out_path, index=False)
